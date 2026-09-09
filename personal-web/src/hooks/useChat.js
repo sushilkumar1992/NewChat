@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api.js";
 import { streamMessage } from "../services/streamClient.js";
+import { newSessionId } from "../services/session.js";
 import { isNegative, isAffirmative } from "../services/replies.js";
 import { useConfig } from "../context/ConfigContext.jsx";
 
@@ -20,6 +21,12 @@ export function useChat() {
   const busyRef = useRef(false);
   const endedRef = useRef(false);
   const openedRef = useRef(false);
+  const endedAtRef = useRef(null);
+  const messagesRef = useRef([]);
+
+  // Keep a ref to the latest transcript so submitFeedback can read message counts
+  // at end-of-session without re-creating the callback on every new message.
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
 
   const addBot = useCallback((text, extra = {}) => {
     setMessages((prev) => [...prev, { id: mkId(), role: "bot", text, ts: Date.now(), ...extra }]);
@@ -31,19 +38,19 @@ export function useChat() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...(typeof updater === "function" ? updater(m) : updater) } : m)));
   }, []);
 
-  const open = useCallback(async () => {
+  const open = useCallback(() => {
     if (openedRef.current) return;
     openedRef.current = true;
     startedAtRef.current = Date.now();
-    let greeting = config.greeting;
-    try {
-      const res = await api.createSession({ theme: null });
-      sessionRef.current = res.sessionId;
-      if (res.greeting) greeting = res.greeting;
-    } catch (e) {
-      sessionRef.current = "local-" + Math.random().toString(36).slice(2, 8); // design-review fallback
-    }
-    addBot(greeting);
+
+    // The sessionId is generated on the client and owned for the entire session
+    // (open -> messages -> feedback). It lives only in memory, so a browser refresh
+    // starts a brand-new session. The backend never allocates a session id — there is
+    // no session-start round-trip.
+    sessionRef.current = newSessionId();
+
+    // Greeting is served by /config (via ConfigContext).
+    addBot(config.greeting);
   }, [config.greeting, addBot]);
 
   const askAnythingElse = useCallback(() => {
@@ -124,11 +131,34 @@ export function useChat() {
   }, [addBot, config.closing]);
 
   const submitFeedback = useCallback(async (rating, reasons, other) => {
-    let durationS = startedAtRef.current ? Math.round((Date.now() - startedAtRef.current) / 1000) : null;
+    // The session officially ends HERE — only after the user provides feedback.
+    const startedMs = startedAtRef.current;
+    const endedMs = Date.now();
+    endedAtRef.current = endedMs;
+    const durationMs = startedMs != null ? endedMs - startedMs : null;
+    const durationS = durationMs != null ? Math.round(durationMs / 1000) : null;
+
+    const msgs = messagesRef.current;
+    // Real conversation volume only: user messages + bot answers. Excludes bot system
+    // lines (greeting, closing, and "Is there anything else?" follow-ups).
+    const messageCount = msgs.filter((m) => m.role === "user" || (m.role === "bot" && m.answer)).length;
+    const questionCount = msgs.filter((m) => m.role === "bot" && m.answer).length; // answered questions
+
+    // The frontend owns the entire session record; the backend only consumes and
+    // persists it (DynamoDB) and must NOT recompute or override the duration.
     try {
-      const res = await api.postFeedback(sessionRef.current, { rating, reasons, other });
-      if (res && res.durationMs != null) durationS = Math.round(res.durationMs / 1000);
-    } catch (e) {}
+      await api.postFeedback(sessionRef.current, {
+        rating,
+        reasons,
+        other,
+        startedAt: startedMs != null ? new Date(startedMs).toISOString() : null,
+        endedAt: new Date(endedMs).toISOString(),
+        durationMs,
+        messageCount,
+        questionCount
+      });
+    } catch (e) { /* best-effort — the UI still shows the session summary */ }
+
     return durationS;
   }, []);
 
@@ -153,6 +183,7 @@ export function useChat() {
     awaitingMoreRef.current = false;
     busyRef.current = false;
     endedRef.current = false;
+    endedAtRef.current = null;
     setMessages([]);
     setBusy(false);
     setEnded(false);

@@ -1,4 +1,4 @@
-// Buffered HTTP API calls (sessions, feedback, end, config, suggestions).
+// Buffered HTTP API calls (config, suggestions, session feedback, per-message feedback).
 const BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 if (!BASE) {
   console.warn(
@@ -20,11 +20,16 @@ async function req(path, opts = {}) {
 export const api = {
   getConfig: () => req("/config"),
   getSuggestions: () => req("/suggestions"),
-  createSession: (payload) => req("/sessions", { method: "POST", body: payload }),
+  // Session feedback + summary, sent once when the user submits feedback — which is
+  // also the moment the session ends. The client owns and sends the whole record:
+  // rating/reasons/other plus startedAt, endedAt, durationMs, messageCount and
+  // questionCount. The backend only consumes these and persists them (DynamoDB); it
+  // must NOT recompute or override the duration. (Session ids are client-generated, so
+  // there is no createSession/endSession call — the backend consumes the id lazily on
+  // /messages and on this feedback write.)
   postFeedback: (sessionId, payload) =>
     req(`/sessions/${encodeURIComponent(sessionId)}/feedback`, { method: "POST", body: payload }),
+  // Per-message thumbs up/down on an individual bot answer (independent of session end).
   postMessageFeedback: (sessionId, payload) =>
-    req(`/sessions/${encodeURIComponent(sessionId)}/messages/feedback`, { method: "POST", body: payload }),
-  endSession: (sessionId) =>
-    req(`/sessions/${encodeURIComponent(sessionId)}/end`, { method: "POST", body: {} })
+    req(`/sessions/${encodeURIComponent(sessionId)}/messages/feedback`, { method: "POST", body: payload })
 };
