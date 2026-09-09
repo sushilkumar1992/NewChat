@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personal · KPI Dashboard</title>
+  <style>
+    body{margin:0;font-family:"Manrope",Arial,sans-serif;background:#f7f7f8;color:#1a1a1a;}
+    .top{background:linear-gradient(135deg,#000,#1c1c1c);color:#fff;padding:22px 32px;border-bottom:3px solid #E87511;}
+    .top h1{margin:0;font-size:22px;font-weight:800;}
+    .wrap{max-width:820px;margin:40px auto;padding:0 24px;}
+    .card{background:#fff;border:1px solid #e6e6e9;border-left:4px solid #E87511;border-radius:14px;padding:24px;box-shadow:0 8px 24px rgba(0,0,0,.06);}
+    code{background:#f0f0f2;padding:2px 6px;border-radius:5px;}
+  </style>
+</head>
+<body>
+  <div class="top"><h1>Personal · KPI Dashboard</h1></div>
+  <div class="wrap">
+    <div class="card">
+      <h2>Data is being captured</h2>
+      <p>Every chat interaction — session open, each message, escalation, feedback, total chat time,
+         full transcript, token usage and cost, plus running aggregate metrics — is stored in
+         <strong>Amazon DynamoDB</strong> (table <code>personal-chat</code>).</p>
+      <p>The KPI <em>dashboard UI</em> is a later deliverable. This page is a placeholder so the menu link
+         resolves. Once built, it will read the aggregate metrics item and the sessions index via a read API.</p>
+    </div>
+  </div>
+</body>
+</html>
