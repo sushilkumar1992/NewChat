@@ -61,7 +61,6 @@ No body.
   "greeting": "Hi, I am Personal, your Virtual Assistant. How can I help you today?",
   "closing": "Thank you for using Personal. We value your trust in us. Please share your valuable feedback (thumbs up/thumbs down) to help us improve the experience.",
   "followUp": "Is there anything else I can help you with?",
-  "followUpYes": "Sure! Go ahead and type your question below.",
   "maxQuestionWords": 150,
   "csrPhone": "1-800-555-0142",
   "feedbackReasons": ["Incorrect answer", "Not relevant", "Missing information", "Other"]
@@ -73,8 +72,7 @@ No body.
 | `botName` | string | Shown in the chat header. |
 | `greeting` | string | First bot message when the chat opens. |
 | `closing` | string | Bot message shown when the user ends the chat. |
-| `followUp` | string | Prompt shown after each answer ("anything else?"). |
-| `followUpYes` | string | Reply if the user answers "yes" to the follow-up. |
+| `followUp` | string | Prompt shown after each non-ending answer ("anything else?"). |
 | `maxQuestionWords` | number | Hard word cap enforced in the composer (default 150). |
 | `csrPhone` | string | Support phone (reserved for escalation display). |
 | `feedbackReasons` | string[] | Reason chips shown on a thumbs-**down** session rating. Include `"Other"` to enable the free-text box. |
@@ -147,7 +145,7 @@ Event types (the `type` field discriminates each line):
 |---|---|---|
 | `start` | `{ "type": "start" }` | Optional. Signals the stream opened. |
 | `token` | `{ "type": "token", "text": "partial " }` | A chunk of the answer. Sent many times. **The typing indicator hides on the first `token`.** |
-| `done` | `{ "type": "done", "images": [...], "imageMode": "single", "escalation": false }` | Terminal success event. Carries optional attachments. |
+| `done` | `{ "type": "done", "images": [...], "imageMode": "single", "escalation": false, "endSession": false }` | Terminal success event. Carries optional attachments and the end-of-session signal. |
 | `error` | `{ "type": "error", "message": "…" }` | Terminal failure event. The client shows `message` in the bubble. |
 
 **Example stream**
@@ -160,6 +158,13 @@ Event types (the `type` field discriminates each line):
 {"type":"done","images":[{"url":"https://cdn.example.com/step1.png","caption":"Open Settings"}],"imageMode":"stepper","escalation":false}
 ```
 
+**Example — user ends the session** (their reply was e.g. "no thanks, that's all"). The LLM detects the end-intent and sets `endSession`; stream little or no answer text on this turn, since the closing copy comes from `/config`:
+
+```
+{"type":"start"}
+{"type":"done","endSession":true}
+```
+
 **`done` event fields**
 
 | Field | Type | Notes |
@@ -167,6 +172,7 @@ Event types (the `type` field discriminates each line):
 | `images` | array \| null | Optional attachments. Each: `{ "url": string, "caption"?: string }`. |
 | `imageMode` | string \| null | How to render images: `"single"`, `"stepper"`, or `"stack"`. Defaults to `single`. |
 | `escalation` | boolean | Optional. Marks an answer that should suggest human support. (Plumbed through; not yet surfaced in the UI.) |
+| `endSession` | boolean | Optional. **`true` ends the session:** the frontend shows the closing message (`config.closing`) + the feedback panel instead of the "anything else?" prompt. The **LLM** sets this when the user signals they are done (e.g. "no thanks", "that's all") — the frontend no longer keyword-matches. Keep the streamed answer text empty/minimal on this turn (the closing copy comes from `/config`). |
 
 **Image render modes**
 
@@ -177,14 +183,15 @@ Event types (the `type` field discriminates each line):
 **Behavior notes for the backend**
 
 - The client shows a typing indicator from send until the **first `token`** — server-driven loading. Send `token` events as soon as content is ready.
-- After a `done` event the frontend appends the "anything else?" follow-up automatically. Do **not** send it as a token.
+- After a `done` event with `endSession` false/absent, the frontend appends the "anything else?" follow-up automatically. Do **not** send it as a token. When `endSession` is `true`, the frontend shows the closing message + feedback panel instead of the follow-up.
+- **End-of-session detection is the LLM's job.** The frontend does no keyword matching. When a user's reply means they are finished (e.g. "no thanks", "I'm good", "that covers it"), classify it and return `done.endSession = true`. A bare "yes" to the "anything else?" prompt is a normal turn — respond naturally (e.g. invite the next question). The manual "End chat" button remains as a fallback if the model misses an end-intent.
 - On any network/HTTP error the client shows a generic retry message; prefer an explicit `error` event with a friendly `message` when you can.
 
 ---
 
 ## 6. `POST /sessions/{sessionId}/feedback` — session feedback + summary (session end)
 
-Sent **once**, when the user submits end-of-session feedback. **This is the moment the session ends.** The frontend sends the complete, client-owned session record here; persist it to DynamoDB as-is.
+Sent **once**, when the user submits end-of-session feedback. **This is the moment the session ends.** The frontend sends the complete, client-owned session record here; persist it to DynamoDB as-is. (The feedback panel that produces this call is opened either by the manual "End chat" button or by an `endSession: true` signal on the streaming `done` event — see §5.)
 
 > The backend **must not** recompute `durationMs`, `startedAt`, or `endedAt`. These are authoritative from the client.
 
@@ -325,6 +332,7 @@ createdAt (S)                 — server-side write time
 - [ ] `GET /config` returns the copy/config object (all fields optional; frontend has fallbacks).
 - [ ] `GET /suggestions` returns `{ suggestions: [{ id, question }] }` (empty → UI hidden).
 - [ ] Streaming Lambda Function URL (`RESPONSE_STREAM`) accepts `{ sessionId, text }` and emits NDJSON `start`/`token`/`done`/`error` events; **first `token` clears the loading state**.
+- [ ] The LLM classifies **end-of-session intent** and returns `done.endSession = true` when the user is finished (no client-side keyword matching); a bare "yes" is a normal turn.
 - [ ] `POST /sessions/{id}/feedback` persists the full session summary **verbatim**; duration/timestamps are **not** recomputed.
 - [ ] `POST /sessions/{id}/messages/feedback` records per-answer votes.
 - [ ] Sessions are **upserted** by the client-supplied `sessionId`; the backend never generates a session id.

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api.js";
 import { streamMessage } from "../services/streamClient.js";
 import { newSessionId } from "../services/session.js";
-import { isNegative, isAffirmative } from "../services/replies.js";
 import { useConfig } from "../context/ConfigContext.jsx";
 
 let seq = 0;
@@ -17,7 +16,6 @@ export function useChat() {
 
   const sessionRef = useRef(null);
   const startedAtRef = useRef(null);
-  const awaitingMoreRef = useRef(false);
   const busyRef = useRef(false);
   const endedRef = useRef(false);
   const openedRef = useRef(false);
@@ -55,9 +53,19 @@ export function useChat() {
 
   const askAnythingElse = useCallback(() => {
     if (endedRef.current) return;
-    awaitingMoreRef.current = true;
     addBot(config.followUp);
   }, [config.followUp, addBot]);
+
+  // Ends the session UI: appends the closing message and opens the feedback panel.
+  // Reached two ways — the manual "End chat" button, and the backend LLM signalling
+  // endSession on a streamed answer (see streamAsk onDone). Idempotent via endedRef.
+  const beginEnd = useCallback(() => {
+    if (endedRef.current) return;
+    addBot(config.closing);
+    endedRef.current = true;
+    setEnded(true);
+    setFeedbackOpen(true);
+  }, [addBot, config.closing]);
 
   const streamAsk = useCallback(
     (text) => {
@@ -81,7 +89,23 @@ export function useChat() {
             });
             setBusy(false);
             busyRef.current = false;
-            askAnythingElse();
+            // The backend LLM decides whether this turn ends the session.
+            if (evt.endSession) {
+              // Closing turn: this bubble is not a rateable Q&A answer. Drop it if it
+              // carried no text/images, otherwise keep it but unflag it as an answer.
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.id === id) {
+                  const empty = !String(last.text).trim() && !(last.images && last.images.length);
+                  if (empty) return prev.slice(0, -1);
+                  return prev.map((m) => (m.id === id ? { ...m, answer: false } : m));
+                }
+                return prev;
+              });
+              beginEnd();
+            } else {
+              askAnythingElse();
+            }
           },
           onError: (msg) => {
             patch(id, { loading: false, streaming: false, text: msg || "Sorry, something went wrong. Please try again." });
@@ -91,7 +115,7 @@ export function useChat() {
         }
       );
     },
-    [patch, askAnythingElse]
+    [patch, askAnythingElse, beginEnd]
   );
 
   const sendText = useCallback(
@@ -99,23 +123,18 @@ export function useChat() {
       if (busyRef.current || endedRef.current) return;
       const text = String(raw || "").trim();
       if (!text) return;
+      // Every reply — including "no thanks" or "yes" — goes to the stream. The backend
+      // LLM classifies intent and signals endSession when the user is done; the client
+      // no longer guesses with keyword matching.
       addUser(text);
-
-      if (awaitingMoreRef.current) {
-        awaitingMoreRef.current = false;
-        if (isNegative(text)) return endChat();
-        if (isAffirmative(text)) return addBot(config.followUpYes);
-        // otherwise treat as a new question → fall through
-      }
       streamAsk(text);
     },
-    [addUser, addBot, config.followUpYes, streamAsk]
+    [addUser, streamAsk]
   );
 
   const sendSuggestion = useCallback(
     (question) => {
       if (busyRef.current || endedRef.current) return;
-      awaitingMoreRef.current = false;
       addUser(question);
       streamAsk(question);
     },
@@ -123,12 +142,9 @@ export function useChat() {
   );
 
   const endChat = useCallback(() => {
-    if (endedRef.current || busyRef.current) return;
-    addBot(config.closing);
-    endedRef.current = true;
-    setEnded(true);
-    setFeedbackOpen(true);
-  }, [addBot, config.closing]);
+    if (busyRef.current) return; // ignore the button while an answer is still streaming
+    beginEnd();
+  }, [beginEnd]);
 
   const submitFeedback = useCallback(async (rating, reasons, other) => {
     // The session officially ends HERE — only after the user provides feedback.
@@ -180,7 +196,6 @@ export function useChat() {
   const startNew = useCallback(() => {
     openedRef.current = false;
     sessionRef.current = null;
-    awaitingMoreRef.current = false;
     busyRef.current = false;
     endedRef.current = false;
     endedAtRef.current = null;

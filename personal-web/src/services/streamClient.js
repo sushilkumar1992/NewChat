@@ -1,5 +1,5 @@
 // Consumes the streaming Lambda Function URL (POST /messages) and dispatches
-// NDJSON events: {type:"start"} {type:"token",text} {type:"done",...} {type:"error",message}.
+// NDJSON events: {type:"start"} {type:"token",text} {type:"done",images?,imageMode?,escalation?,endSession?} {type:"error",message}.
 // Loading is server-driven: the caller shows the typing indicator until the first `token`.
 const STREAM_URL = (import.meta.env.VITE_STREAM_URL || "").replace(/\/$/, "") + "/";
 if (!import.meta.env.VITE_STREAM_URL) {
