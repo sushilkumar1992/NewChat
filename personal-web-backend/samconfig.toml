@@ -1,0 +1,19 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "personal-web-backend"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "personal-web-backend"
+region = "us-east-2"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = true
+# AgentRuntimeArn has no default — pass it at deploy time, e.g.:
+#   sam deploy --parameter-overrides AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<acct>:runtime/<id>
+# Table name overrides are optional (defaults match template.yaml):
+#   --parameter-overrides AgentRuntimeArn=... TableSessions=pva_sessions TableMessages=pva_messages ...

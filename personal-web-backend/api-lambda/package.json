@@ -1,0 +1,11 @@
+{
+  "name": "personal-web-api-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API Lambda (HTTP API) for /config, /suggestions and the feedback endpoints.",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@aws-sdk/lib-dynamodb": "^3.1128.0"
+  }
+}

@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Personal Virtual Assistant backend. Two Lambdas:
+   - ApiFunction    : HTTP API for /config, /suggestions and the feedback endpoints.
+   - StreamFunction : Function URL (RESPONSE_STREAM) relaying a Bedrock AgentCore runtime.
+  DynamoDB tables are created separately (via the console) and referenced by name below.
+
+Parameters:
+  AgentRuntimeArn:
+    Type: String
+    Description: ARN of the Bedrock AgentCore runtime the streaming Lambda invokes.
+  TableSessions:
+    Type: String
+    Default: pva_sessions
+  TableMessages:
+    Type: String
+    Default: pva_messages
+  TableMessageFeedback:
+    Type: String
+    Default: pva_message_feedback
+  TableConfig:
+    Type: String
+    Default: pva_config
+  TableSuggestions:
+    Type: String
+    Default: pva_suggestions
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+  # ---- HTTP API (buffered JSON endpoints) with CORS handled at the gateway ----
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - content-type
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: api-lambda/
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_SESSIONS: !Ref TableSessions
+          TABLE_MESSAGE_FEEDBACK: !Ref TableMessageFeedback
+          TABLE_CONFIG: !Ref TableConfig
+          TABLE_SUGGESTIONS: !Ref TableSuggestions
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableSessions
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableMessageFeedback
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableConfig
+        - DynamoDBReadPolicy:
+            TableName: !Ref TableSuggestions
+      Events:
+        GetConfig:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /config
+        GetSuggestions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /suggestions
+        PostSessionFeedback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /sessions/{sessionId}/feedback
+        PostMessageFeedback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /sessions/{sessionId}/messages/feedback
+
+  # ---- Streaming Lambda (Function URL, RESPONSE_STREAM) ----
+  StreamFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: streaming-lambda/
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+          TABLE_MESSAGES: !Ref TableMessages
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowMethods:
+            - POST
+          AllowHeaders:
+            - content-type
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TableMessages
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeAgentRuntime
+              Resource:
+                - !Ref AgentRuntimeArn
+                - !Sub "${AgentRuntimeArn}/*"
+
+Outputs:
+  HttpApiBaseUrl:
+    Description: Set this as VITE_API_BASE_URL in the frontend .env
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  StreamFunctionUrl:
+    Description: Set this as VITE_STREAM_URL in the frontend .env
+    Value: !GetAtt StreamFunctionUrl.FunctionUrl

@@ -1,0 +1,12 @@
+{
+  "name": "personal-web-stream-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Streaming Lambda (Function URL) relaying a Bedrock AgentCore runtime to the browser as NDJSON.",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "^3.1128.0",
+    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@aws-sdk/lib-dynamodb": "^3.1128.0"
+  }
+}

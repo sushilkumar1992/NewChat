@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# SAM build artifacts
+.aws-sam/
+
+# Zipped functions (if you build zips manually)
+*.zip
+
+# Env / local
+.env
+.env.*
+!.env.example
+
+# OS junk
+.DS_Store
+Thumbs.db
