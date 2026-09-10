@@ -69,6 +69,8 @@ The streaming Lambda calls `bedrock-agentcore:InvokeAgentRuntime` against your a
 
 ## 3. Build & deploy with SAM
 
+> SAM provisions the **API Gateway HTTP API** (for the api-lambda) and the streaming **Lambda Function URL** (for the streaming-lambda) for you from `template.yaml` — no manual console clicks in the happy path. **Appendix A (§12)** documents exactly what SAM configures for each, plus the equivalent **manual console and CLI steps** if you ever need to build or verify them by hand.
+
 From the `personal-web-backend/` folder:
 
 ```bash
@@ -300,9 +302,150 @@ The frontend owns `startedAt` / `endedAt` / `durationMs` / `messageCount` / `que
 ## 11. Notes & troubleshooting
 
 - **Region:** everything is us-east-2. If you change it, update `samconfig.toml`, the DynamoDB tables' region, and the agent runtime region, and redeploy.
-- **CORS:** the HTTP API and the Function URL are configured with `AllowOrigins: *` for development. For production, restrict to your site's origin (edit `CorsConfiguration` and `FunctionUrlConfig.Cors` in `template.yaml`, then redeploy).
+- **CORS & preflight:** the frontend sends `content-type: application/json`, which makes the POST calls (and, unless optimized, the GETs) **non-simple**, so the browser fires an `OPTIONS` preflight first. Both front doors answer preflight automatically: the HTTP API via `CorsConfiguration`, the Function URL via `FunctionUrlConfig.Cors` (both allow the `content-type` header and the needed methods). **CORS headers are set in exactly one place per door** — the api-lambda and the streaming-lambda return **no** `Access-Control-*` headers themselves; the gateway / Function URL add them. Setting them in code as well produces duplicate `Access-Control-Allow-Origin` values (`*, *`) that browsers reject. All are `AllowOrigins: *` for development — restrict to your site's origin for production (edit `CorsConfiguration` and `FunctionUrlConfig.Cors` in `template.yaml`, then redeploy). The frontend also omits `content-type` on GETs so `/config` and `/suggestions` skip the preflight entirely.
 - **Streaming needs a Function URL**, not API Gateway — API Gateway does not support Lambda response streaming. That's why the two Lambdas use different front doors.
 - **`awslambda` is undefined locally:** that global only exists in the Lambda Node runtime; the streaming code runs on AWS, not locally.
 - **`AGENT_RUNTIME_ARN is not configured`** in the stream response → the parameter wasn't passed; redeploy with `--parameter-overrides AgentRuntimeArn=...`.
 - **AccessDenied on InvokeAgentRuntime** → the ARN passed at deploy doesn't match the agent, or the agent is in another region. Confirm the ARN and region.
 - **Empty `/suggestions`** → seed `pva_suggestions` (step 5). Empty is returned (and the UI hides the section) rather than erroring.
+
+---
+
+## 12. Appendix A — API Gateway & Function URL (what SAM does + manual setup)
+
+If you deploy with SAM (§3), **skip this** — it's already done. This appendix is the reference for what SAM built, how to verify it, and how to set both up **by hand** (console or CLI) if you're not using SAM.
+
+### 12.1 What SAM creates
+
+**API Gateway HTTP API** (front door for **api-lambda**):
+- Protocol **HTTP**, Lambda **proxy** integration (payload format **2.0**) to `ApiFunction`.
+- Four routes → the same integration:
+  - `GET /config`
+  - `GET /suggestions`
+  - `POST /sessions/{sessionId}/feedback`
+  - `POST /sessions/{sessionId}/messages/feedback`
+- **CORS**: AllowOrigins `*`, AllowMethods `GET,POST,OPTIONS`, AllowHeaders `content-type` (API Gateway answers `OPTIONS` preflight itself).
+- **Stage** `$default` with **auto-deploy** — served at the API root with **no stage path**, so the base URL is exactly `https://<api-id>.execute-api.us-east-2.amazonaws.com`.
+- Lambda invoke permission for API Gateway (added automatically).
+
+**Lambda Function URL** (front door for **streaming-lambda**):
+- **AuthType** `NONE`, **InvokeMode** `RESPONSE_STREAM` (streaming is only possible this way — not via API Gateway).
+- **CORS**: AllowOrigins `*`, AllowMethods `POST`, AllowHeaders `content-type`.
+- Public invoke permission (`lambda:InvokeFunctionUrl`) added automatically.
+
+**Verify after deploy:**
+```bash
+# HTTP API + its routes
+aws apigatewayv2 get-apis --region us-east-2 \
+  --query "Items[?Name=='personal-web-backend'].[ApiId,ApiEndpoint]" --output table
+aws apigatewayv2 get-routes --region us-east-2 --api-id <API_ID> \
+  --query "Items[].RouteKey" --output table
+
+# Streaming Function URL config (note InvokeMode + AuthType)
+aws lambda get-function-url-config --region us-east-2 \
+  --function-name <StreamFunctionPhysicalName>
+```
+(Get `<...PhysicalName>` from `aws cloudformation describe-stack-resources` — see §9.) In the console: **API Gateway → APIs → (your API) → Routes / CORS / Stages**, and **Lambda → (stream function) → Configuration → Function URL**.
+
+### 12.2 Manual — API Gateway HTTP API (console)
+
+Only if you are **not** using SAM.
+
+1. **API Gateway** console (region **us-east-2**) → **Create API** → **HTTP API** → **Build**.
+2. **Add integration** → **Lambda** → region `us-east-2` → select your api-lambda function. **API name**: `personal-web-api`. **Next**.
+3. **Configure routes** — add all four (Method + Path), each with the Lambda integration you just added:
+   - `GET` `/config`
+   - `GET` `/suggestions`
+   - `POST` `/sessions/{sessionId}/feedback`
+   - `POST` `/sessions/{sessionId}/messages/feedback`
+
+   **Next**.
+4. **Configure stages**: keep the auto-created **`$default`** stage with **Auto-deploy** on. **Next** → **Create**.
+5. **CORS**: open the API → **CORS** → **Configure**:
+   - Access-Control-Allow-Origin: `*` (use your site origin in production)
+   - Access-Control-Allow-Methods: `GET, POST, OPTIONS`
+   - Access-Control-Allow-Headers: `content-type`
+
+   **Save**.
+6. Copy the **Invoke URL / default endpoint** (`https://<api-id>.execute-api.us-east-2.amazonaws.com`) → this is `VITE_API_BASE_URL`.
+7. Adding the Lambda integration in the console **auto-adds** the resource-based invoke permission. (If you built the integration another way, add it — see the `add-permission` command in §12.3.)
+
+### 12.3 Manual — API Gateway HTTP API (CLI)
+
+```bash
+ACCT=<ACCOUNT_ID>
+FN=<ApiFunctionPhysicalName>
+
+# 1) Create the HTTP API with CORS
+API_ID=$(aws apigatewayv2 create-api --region us-east-2 \
+  --name personal-web-api --protocol-type HTTP \
+  --cors-configuration AllowOrigins="*",AllowMethods="GET,POST,OPTIONS",AllowHeaders="content-type" \
+  --query ApiId --output text)
+
+# 2) Lambda proxy integration (payload v2.0)
+INT_ID=$(aws apigatewayv2 create-integration --region us-east-2 --api-id "$API_ID" \
+  --integration-type AWS_PROXY \
+  --integration-uri "arn:aws:lambda:us-east-2:${ACCT}:function:${FN}" \
+  --integration-method POST --payload-format-version 2.0 \
+  --query IntegrationId --output text)
+
+# 3) The four routes
+for R in "GET /config" "GET /suggestions" \
+         "POST /sessions/{sessionId}/feedback" \
+         "POST /sessions/{sessionId}/messages/feedback"; do
+  aws apigatewayv2 create-route --region us-east-2 --api-id "$API_ID" \
+    --route-key "$R" --target "integrations/${INT_ID}"
+done
+
+# 4) Auto-deploy $default stage
+aws apigatewayv2 create-stage --region us-east-2 --api-id "$API_ID" \
+  --stage-name '$default' --auto-deploy
+
+# 5) Let API Gateway invoke the Lambda
+aws lambda add-permission --region us-east-2 --function-name "$FN" \
+  --statement-id apigw-invoke --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:us-east-2:${ACCT}:${API_ID}/*/*"
+
+echo "Base URL: https://${API_ID}.execute-api.us-east-2.amazonaws.com"
+```
+
+### 12.4 Manual — streaming Lambda Function URL (console)
+
+1. **Lambda** console → your streaming function → **Configuration** tab → **Function URL** → **Create function URL**.
+2. **Auth type**: **NONE**.
+3. **Invoke mode**: **RESPONSE_STREAM** (this is what enables token streaming — the default `BUFFERED` will not stream).
+4. **Configure cross-origin resource sharing (CORS)**: enable, then
+   - Allow origin: `*`
+   - Allow methods: `POST`
+   - Allow headers: `content-type`
+5. **Save**. Copy the **Function URL** (`https://<id>.lambda-url.us-east-2.on.aws/`) → this is `VITE_STREAM_URL`.
+6. Also set the function's **environment variables** (Configuration → Environment variables): `AGENT_RUNTIME_ARN`, `TABLE_MESSAGES`, and confirm its **execution role** allows `bedrock-agentcore:InvokeAgentRuntime` and DynamoDB writes to `pva_messages`.
+
+### 12.5 Manual — streaming Lambda Function URL (CLI)
+
+```bash
+FN=<StreamFunctionPhysicalName>
+
+aws lambda create-function-url-config --region us-east-2 \
+  --function-name "$FN" \
+  --auth-type NONE \
+  --invoke-mode RESPONSE_STREAM \
+  --cors '{"AllowOrigins":["*"],"AllowMethods":["POST"],"AllowHeaders":["content-type"]}'
+
+# Public invoke permission for the URL
+aws lambda add-permission --region us-east-2 \
+  --function-name "$FN" \
+  --statement-id FunctionURLAllowPublicAccess \
+  --action lambda:InvokeFunctionUrl \
+  --principal "*" \
+  --function-url-auth-type NONE
+
+# Read back the URL
+aws lambda get-function-url-config --region us-east-2 --function-name "$FN" \
+  --query FunctionUrl --output text
+```
+
+### 12.6 Verify both
+
+Use the `curl` calls in **§7** against the two URLs. A successful `GET /config` and a streaming response (`{"type":"start"}` … `{"type":"done",...}`) confirm the API Gateway routes and the Function URL streaming mode are wired correctly.

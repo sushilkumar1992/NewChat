@@ -39,10 +39,12 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   const httpResponse = awslambda.HttpResponseStream.from(responseStream, {
     statusCode: 200,
     headers: {
-      "Content-Type": "application/x-ndjson",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type,Authorization",
-      "Access-Control-Allow-Methods": "POST,OPTIONS"
+      // CORS (including the OPTIONS preflight) is handled by the Function URL's own
+      // CORS config (template.yaml FunctionUrlConfig.Cors / DEPLOYMENT.md §12.4).
+      // Do NOT set Access-Control-* here as well — Lambda would append them to the
+      // URL-config headers and the browser would see duplicate "Access-Control-Allow-Origin"
+      // values ("*, *") and reject the response with a CORS error.
+      "Content-Type": "application/x-ndjson"
     }
   });
 

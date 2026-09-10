@@ -8,9 +8,15 @@ if (!BASE) {
 }
 
 async function req(path, opts = {}) {
+  // Only send content-type when there is a JSON body. A GET that sets
+  // "content-type: application/json" is NOT a CORS "simple request", so it would
+  // trigger an extra preflight OPTIONS on every /config and /suggestions call.
+  // Header-less GETs stay simple and skip the preflight entirely.
+  const headers = {};
+  if (opts.body) headers["content-type"] = "application/json";
   const res = await fetch(BASE + path, {
     method: opts.method || "GET",
-    headers: { "content-type": "application/json" },
+    headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
   if (!res.ok) throw new Error("API " + res.status + " for " + path);

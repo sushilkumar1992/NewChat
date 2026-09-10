@@ -57,7 +57,7 @@ Lambda **Function URL**, `AuthType: NONE`, `InvokeMode: RESPONSE_STREAM`, CORS `
 | done | `{"type":"done","escalation":false,"endSession":false}` | After the agent stream ends. |
 | error | `{"type":"error","message":"..."}` | On any failure (bad input, agent error). |
 
-Response headers set on the stream: `Content-Type: application/x-ndjson` plus permissive CORS.
+The only response header set in code is `Content-Type: application/x-ndjson`. **CORS (and the `OPTIONS` preflight) is handled entirely by the Function URL's CORS config** — the handler must not set `Access-Control-*` headers too, or Lambda appends them to the URL-config headers and the browser sees a duplicate `Access-Control-Allow-Origin` (`*, *`) and rejects the response.
 
 ### Handler flow
 1. Build the streaming HTTP response (`HttpResponseStream.from`) with status 200 + headers.
