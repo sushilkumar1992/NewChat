@@ -62,7 +62,6 @@ No body.
   "closing": "Thank you for using Personal. We value your trust in us. Please share your valuable feedback (thumbs up/thumbs down) to help us improve the experience.",
   "followUp": "Is there anything else I can help you with?",
   "maxQuestionWords": 150,
-  "csrPhone": "1-800-555-0142",
   "feedbackReasons": ["Incorrect answer", "Not relevant", "Missing information", "Other"]
 }
 ```
@@ -74,7 +73,6 @@ No body.
 | `closing` | string | Bot message shown when the user ends the chat. |
 | `followUp` | string | Prompt shown after each non-ending answer ("anything else?"). |
 | `maxQuestionWords` | number | Hard word cap enforced in the composer (default 150). |
-| `csrPhone` | string | Support phone (reserved for escalation display). |
 | `feedbackReasons` | string[] | Reason chips shown on a thumbs-**down** session rating. Include `"Other"` to enable the free-text box. |
 
 > **Note:** Per-message feedback on/off is controlled by a **frontend** env flag (`VITE_ENABLE_MESSAGE_FEEDBACK`), not by `/config`. Any `messageFeedback` value returned here is ignored by the client.
@@ -266,7 +264,7 @@ Example of "Other" free-text:
 
 ## 7. `POST /sessions/{sessionId}/messages/feedback` — per-message thumbs
 
-Sent immediately when a user taps 👍/👎 on an **individual bot answer**. Independent of session end. Non-blocking (the UI updates regardless of the response).
+Sent immediately when a user taps 👍/👎 on an **individual bot answer**. Independent of session end. Non-blocking (the UI updates regardless of the response). **Re-submittable:** the user can change their vote as many times as they like; the backend keys the record by `sessionId` + `messageId` and **updates the same record** each time rather than inserting a new one.
 
 **Request**
 
@@ -287,7 +285,7 @@ Content-Type: application/json
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | Client-side id of the rated bot message (unique within the session). |
-| `rating` | `"up"` \| `"down"` | The vote. One-time per message (client enforces). |
+| `rating` | `"up"` \| `"down"` | The vote. May be re-sent/changed; the backend updates the same record. |
 | `query` | string \| null | The user question that produced this answer. |
 | `answer` | string \| null | The bot answer text that was rated. |
 

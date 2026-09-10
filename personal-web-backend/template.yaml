@@ -10,21 +10,10 @@ Parameters:
   AgentRuntimeArn:
     Type: String
     Description: ARN of the Bedrock AgentCore runtime the streaming Lambda invokes.
-  TableSessions:
+  TableName:
     Type: String
-    Default: pva_sessions
-  TableMessages:
-    Type: String
-    Default: pva_messages
-  TableMessageFeedback:
-    Type: String
-    Default: pva_message_feedback
-  TableConfig:
-    Type: String
-    Default: pva_config
-  TableSuggestions:
-    Type: String
-    Default: pva_suggestions
+    Default: RBPOCTable
+    Description: Single DynamoDB table (PK/SK) holding config, suggestions, sessions, messages and feedback.
 
 Globals:
   Function:
@@ -58,19 +47,10 @@ Resources:
       MemorySize: 256
       Environment:
         Variables:
-          TABLE_SESSIONS: !Ref TableSessions
-          TABLE_MESSAGE_FEEDBACK: !Ref TableMessageFeedback
-          TABLE_CONFIG: !Ref TableConfig
-          TABLE_SUGGESTIONS: !Ref TableSuggestions
+          TABLE_NAME: !Ref TableName
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref TableSessions
-        - DynamoDBCrudPolicy:
-            TableName: !Ref TableMessageFeedback
-        - DynamoDBReadPolicy:
-            TableName: !Ref TableConfig
-        - DynamoDBReadPolicy:
-            TableName: !Ref TableSuggestions
+            TableName: !Ref TableName
       Events:
         GetConfig:
           Type: HttpApi
@@ -108,7 +88,7 @@ Resources:
       Environment:
         Variables:
           AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
-          TABLE_MESSAGES: !Ref TableMessages
+          TABLE_NAME: !Ref TableName
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM
@@ -121,7 +101,7 @@ Resources:
             - content-type
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref TableMessages
+            TableName: !Ref TableName
         - Statement:
             - Effect: Allow
               Action:

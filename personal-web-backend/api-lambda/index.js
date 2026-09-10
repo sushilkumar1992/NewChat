@@ -1,22 +1,29 @@
 "use strict";
-// API Lambda (behind API Gateway HTTP API). Handles the buffered JSON endpoints:
+// API Lambda (behind API Gateway HTTP API). Single-table DynamoDB design.
+// Endpoints:
 //   GET  /config
 //   GET  /suggestions
 //   POST /sessions/{sessionId}/feedback              (session feedback + summary; = session end)
-//   POST /sessions/{sessionId}/messages/feedback     (per-message thumbs)
+//   POST /sessions/{sessionId}/messages/feedback     (per-message thumbs; re-submittable — updates same item)
 //
-// CORS is handled by the HTTP API (CorsConfiguration in template.yaml), so the responses
-// here carry no CORS headers. The client generates the sessionId; this Lambda only consumes
-// it (upsert-by-id) and never allocates one, and never recomputes the session duration.
+// CORS is handled by the HTTP API (CorsConfiguration in template.yaml), so responses here
+// carry no CORS headers. The client generates the sessionId; this Lambda only consumes it
+// (upsert-by-id) and never allocates one, and never recomputes the session duration.
+//
+// One DynamoDB table (TABLE_NAME) keyed by PK / SK:
+//   PK = "CONFIG"               SK = <configKey>        -> config singleton
+//   PK = "SUGGESTIONS"          SK = "SUGG#<id>"        -> a suggestion
+//   PK = "SESSION#<sessionId>"  SK = "SESSION"          -> session feedback + summary
+//   PK = "SESSION#<sessionId>"  SK = "MSGFB#<messageId>"-> per-message feedback
+//   PK = "SESSION#<sessionId>"  SK = "MSG#<ts>"         -> Q&A turn (written by streaming-lambda)
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
+const {
+  DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand
+} = require("@aws-sdk/lib-dynamodb");
 
 const REGION = process.env.AWS_REGION || "us-east-2";
-const TABLE_SESSIONS = process.env.TABLE_SESSIONS || "pva_sessions";
-const TABLE_MESSAGE_FEEDBACK = process.env.TABLE_MESSAGE_FEEDBACK || "pva_message_feedback";
-const TABLE_CONFIG = process.env.TABLE_CONFIG || "pva_config";
-const TABLE_SUGGESTIONS = process.env.TABLE_SUGGESTIONS || "pva_suggestions";
+const TABLE = process.env.TABLE_NAME || "RBPOCTable";
 const CONFIG_KEY = process.env.CONFIG_KEY || "default";
 const SUGGESTIONS_LIMIT = Number(process.env.SUGGESTIONS_LIMIT || 5);
 
@@ -32,7 +39,6 @@ const DEFAULT_CONFIG = {
     "Thank you for using Personal. We value your trust in us. Please share your valuable feedback (thumbs up/thumbs down) to help us improve the experience.",
   followUp: "Is there anything else I can help you with?",
   maxQuestionWords: 150,
-  csrPhone: "1-800-555-0142",
   feedbackReasons: ["Incorrect answer", "Not relevant", "Missing information", "Other"]
 };
 
@@ -51,10 +57,10 @@ function parseBody(event) {
 async function getConfig() {
   let stored = {};
   try {
-    const res = await ddb.send(new GetCommand({ TableName: TABLE_CONFIG, Key: { configKey: CONFIG_KEY } }));
+    const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: "CONFIG", SK: CONFIG_KEY } }));
     if (res.Item) {
       stored = { ...res.Item };
-      delete stored.configKey;
+      delete stored.PK; delete stored.SK; delete stored.type;
     }
   } catch (e) {
     console.error("getConfig read failed, using defaults:", e);
@@ -64,7 +70,11 @@ async function getConfig() {
 
 async function getSuggestions() {
   try {
-    const res = await ddb.send(new ScanCommand({ TableName: TABLE_SUGGESTIONS }));
+    const res = await ddb.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: "PK = :p",
+      ExpressionAttributeValues: { ":p": "SUGGESTIONS" }
+    }));
     const items = (res.Items || [])
       .filter((s) => s && s.question)
       .sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0))
@@ -81,6 +91,9 @@ async function postSessionFeedback(sessionId, body) {
   const now = new Date().toISOString();
   // The frontend owns the record; store the values verbatim (no duration recompute).
   const item = {
+    PK: `SESSION#${sessionId}`,
+    SK: "SESSION",
+    type: "SESSION",
     sessionId,
     rating: body.rating ?? null,
     reasons: Array.isArray(body.reasons) ? body.reasons : [],
@@ -93,21 +106,32 @@ async function postSessionFeedback(sessionId, body) {
     createdAt: now,
     updatedAt: now
   };
-  await ddb.send(new PutCommand({ TableName: TABLE_SESSIONS, Item: item }));
+  await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
   return json(200, { ok: true });
 }
 
 async function postMessageFeedback(sessionId, body) {
   if (!body.messageId) return json(400, { error: "messageId is required" });
-  const item = {
-    sessionId,
-    messageId: String(body.messageId),
-    rating: body.rating ?? null,
-    query: body.query ?? null,
-    answer: body.answer ?? null,
-    createdAt: new Date().toISOString()
-  };
-  await ddb.send(new PutCommand({ TableName: TABLE_MESSAGE_FEEDBACK, Item: item }));
+  const now = new Date().toISOString();
+  // Re-submittable: the item is keyed by (session, messageId), so a repeat vote for the
+  // same message UPDATES the same row instead of inserting a duplicate. `createdAt` is kept
+  // from the first vote; `updatedAt` moves each time. (`type`/`query` need alias names.)
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { PK: `SESSION#${sessionId}`, SK: `MSGFB#${String(body.messageId)}` },
+    UpdateExpression:
+      "SET #t = :type, sessionId = :sid, messageId = :mid, rating = :rating, #q = :query, answer = :answer, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)",
+    ExpressionAttributeNames: { "#t": "type", "#q": "query" },
+    ExpressionAttributeValues: {
+      ":type": "MSG_FEEDBACK",
+      ":sid": sessionId,
+      ":mid": String(body.messageId),
+      ":rating": body.rating ?? null,
+      ":query": body.query ?? null,
+      ":answer": body.answer ?? null,
+      ":now": now
+    }
+  }));
   return json(200, { ok: true });
 }
 

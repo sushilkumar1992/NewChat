@@ -19,7 +19,7 @@ const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
 
 const REGION = process.env.AWS_REGION || "us-east-2";
 const AGENT_RUNTIME_ARN = process.env.AGENT_RUNTIME_ARN;
-const TABLE_MESSAGES = process.env.TABLE_MESSAGES || "pva_messages";
+const TABLE_NAME = process.env.TABLE_NAME || "RBPOCTable";
 
 const agentClient = new BedrockAgentCoreClient({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
@@ -28,7 +28,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
 
 async function logMessage(record) {
   try {
-    await ddb.send(new PutCommand({ TableName: TABLE_MESSAGES, Item: record }));
+    await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: record }));
   } catch (e) {
     // Logging is best-effort and must never break the stream.
     console.error("Failed to persist message to DynamoDB:", e);
@@ -122,9 +122,13 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
 
     httpResponse.write(JSON.stringify({ type: "done", escalation, endSession }) + "\n");
 
+    const ts = Date.now();
     await logMessage({
+      PK: `SESSION#${sessionId}`,
+      SK: `MSG#${ts}`,
+      type: "MESSAGE",
       sessionId,
-      ts: Date.now(),
+      ts,
       question: text,
       answer: fullAnswer,
       escalation,

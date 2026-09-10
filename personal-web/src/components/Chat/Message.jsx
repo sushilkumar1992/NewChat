@@ -23,20 +23,18 @@ function TextBody({ text, streaming }) {
 }
 
 // Thumbs up/down for a single bot answer (responses to user queries only).
-// One-time: once a rating is given both buttons are disabled.
+// Re-submittable: the user can change their vote any number of times. The active
+// thumb stays highlighted; each click re-sends and the backend updates the same record.
 function MsgFeedback({ m, onRate }) {
-  const rated = !!m.rating;
-  const vote = (rating) =>
-    !rated && onRate && onRate(m.id, rating, { query: m.query, answer: m.text });
+  const vote = (rating) => onRate && onRate(m.id, rating, { query: m.query, answer: m.text });
   return (
-    <div className={"msg-fb" + (rated ? " msg-fb--done" : "")}>
+    <div className="msg-fb">
       <button
         type="button"
         className={"msg-fb__btn" + (m.rating === "up" ? " active" : "")}
         title="Helpful"
         aria-label="Helpful"
         aria-pressed={m.rating === "up"}
-        disabled={rated}
         onClick={() => vote("up")}
       >
         👍
@@ -47,7 +45,6 @@ function MsgFeedback({ m, onRate }) {
         title="Not helpful"
         aria-label="Not helpful"
         aria-pressed={m.rating === "down"}
-        disabled={rated}
         onClick={() => vote("down")}
       >
         👎

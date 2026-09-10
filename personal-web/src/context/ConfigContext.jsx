@@ -17,7 +17,6 @@ const FALLBACK = {
     "Thank you for using Personal. We value your trust in us. Please share your valuable feedback (thumbs up/thumbs down) to help us improve the experience.",
   followUp: "Is there anything else I can help you with?",
   maxQuestionWords: 150,
-  csrPhone: "1-800-555-0142",
   feedbackReasons: ["Incorrect answer", "Not relevant", "Missing information", "Other"],
   messageFeedback: MESSAGE_FEEDBACK
 };

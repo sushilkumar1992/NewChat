@@ -16,9 +16,7 @@ Browser (personal-web)
    │                                                  ApiFunction (api-lambda)
    │                                                        │  read/write
    │                                                        ▼
-   │                                             DynamoDB: pva_sessions,
-   │                                             pva_message_feedback,
-   │                                             pva_config, pva_suggestions
+   │                                             DynamoDB: RBPOCTable (single table)
    │
    └── POST {StreamFunctionUrl} ──► StreamFunction (streaming-lambda)
                                           │  InvokeAgentRuntime
@@ -26,7 +24,7 @@ Browser (personal-web)
                                   Bedrock AgentCore runtime
                                           │  (NDJSON tokens back)
                                           ▼  write
-                                     DynamoDB: pva_messages
+                                     DynamoDB: RBPOCTable (single table)
 ```
 
 Two Lambdas because they need **different front doors**: buffered JSON endpoints work over API Gateway, but Lambda **response streaming** only works over a **Function URL** with `InvokeMode=RESPONSE_STREAM`. Both are Node.js 22, arm64, CommonJS.
@@ -70,7 +68,7 @@ The only response header set in code is `Content-Type: application/x-ndjson`. **
    - **Signal capture**: boolean `endSession` / `escalation` are read if present at the top level or under `obj.metadata`.
    - Each token is appended to `fullAnswer` and written as a `token` event.
 5. Write the `done` event carrying the captured `escalation` / `endSession`.
-6. Best-effort `PutCommand` into `pva_messages` (`{sessionId, ts, question, answer, escalation, endSession, createdAt}`). A DynamoDB failure is logged, never thrown.
+6. Best-effort `PutCommand` into the table (`PK=SESSION#<sessionId>`, `SK=MSG#<ts>`, plus `type, sessionId, ts, question, answer, escalation, endSession, createdAt`). A DynamoDB failure is logged, never thrown.
 7. `end()` the stream (also runs on the error path).
 
 ### End-of-session (important)
@@ -81,10 +79,10 @@ The frontend does **no** keyword matching — it closes the chat only when `done
 |---|---|---|
 | `AWS_REGION` | `us-east-2` | Auto-set by the runtime. |
 | `AGENT_RUNTIME_ARN` | — | Required. The agent to invoke. |
-| `TABLE_MESSAGES` | `pva_messages` | Q&A log table. |
+| `TABLE_NAME` | `RBPOCTable` | The single shared table. |
 
 ### IAM (granted in template.yaml)
-`bedrock-agentcore:InvokeAgentRuntime` on the agent ARN (and `/*`), plus DynamoDB CRUD on `pva_messages`, plus basic Lambda logging.
+`bedrock-agentcore:InvokeAgentRuntime` on the agent ARN (and `/*`), plus DynamoDB CRUD on `RBPOCTable`, plus basic Lambda logging.
 
 ### Notes
 - Timeout 120s, memory 512 MB — tune to your agent's longest expected answer.
@@ -104,18 +102,18 @@ API Gateway **HTTP API** (payload format 2.0). Routing is by `event.routeKey`; t
 ### Endpoints
 | routeKey | Handler | DynamoDB op | Response |
 |---|---|---|---|
-| `GET /config` | `getConfig` | `GetItem` on `pva_config` (`configKey=default`) | `200` config object (defaults merged under stored values) |
-| `GET /suggestions` | `getSuggestions` | `Scan` `pva_suggestions` | `200 {suggestions:[{id,question}]}` — top N by `count` desc |
-| `POST /sessions/{sessionId}/feedback` | `postSessionFeedback` | `PutItem` `pva_sessions` | `200 {ok:true}` |
-| `POST /sessions/{sessionId}/messages/feedback` | `postMessageFeedback` | `PutItem` `pva_message_feedback` | `200 {ok:true}` (or `400` if `messageId` missing) |
+| `GET /config` | `getConfig` | `GetItem` (`PK=CONFIG`, `SK=default`) | `200` config object (defaults merged under stored values) |
+| `GET /suggestions` | `getSuggestions` | `Query` (`PK=SUGGESTIONS`) | `200 {suggestions:[{id,question}]}` — top N by `count` desc |
+| `POST /sessions/{sessionId}/feedback` | `postSessionFeedback` | `PutItem` (`PK=SESSION#id`, `SK=SESSION`) | `200 {ok:true}` |
+| `POST /sessions/{sessionId}/messages/feedback` | `postMessageFeedback` | `UpdateItem` (`PK=SESSION#id`, `SK=MSGFB#messageId`) | `200 {ok:true}` (or `400` if `messageId` missing) — re-submittable, updates in place |
 
 Unknown routes → `404 {error,routeKey}`. Any thrown error → `500 {error:"Internal error"}` (logged).
 
 ### Behavior details
 - **`getConfig`** merges `DEFAULT_CONFIG` (mirrors the frontend fallback) with the stored row, so the endpoint returns valid copy even before the config row is seeded. A read failure logs and still returns defaults.
-- **`getSuggestions`** scans, filters rows with a `question`, sorts by numeric `count` descending, takes `SUGGESTIONS_LIMIT` (default 5), and maps to `{id, question}`. Any failure returns `{suggestions:[]}` (the UI then hides the section) rather than erroring.
-- **`postSessionFeedback`** writes the client-owned record **verbatim** (`rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`) plus server `createdAt`/`updatedAt`. It does **not** recompute duration. `PutItem` is an upsert — the session row may not exist yet (there is no create call).
-- **`postMessageFeedback`** writes `{sessionId, messageId, rating, query, answer, createdAt}`. `messageId` is required.
+- **`getSuggestions`** queries the `SUGGESTIONS` partition, filters rows with a `question`, sorts by numeric `count` descending, takes `SUGGESTIONS_LIMIT` (default 5), and maps to `{id, question}`. Any failure returns `{suggestions:[]}` (the UI then hides the section) rather than erroring.
+- **`postSessionFeedback`** writes the client-owned record **verbatim** (`rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`) plus server `createdAt`/`updatedAt`, at `PK=SESSION#<id>`, `SK=SESSION`. It does **not** recompute duration. `PutItem` is an upsert — the session row may not exist yet (there is no create call).
+- **`postMessageFeedback`** is **re-submittable**: it does an `UpdateItem` keyed by `PK=SESSION#<id>`, `SK=MSGFB#<messageId>`, so a repeat vote for the same message updates that same item (never a duplicate). `createdAt` is preserved via `if_not_exists`; `updatedAt` moves each time. `messageId` is required.
 
 ### Body & CORS handling
 - `parseBody` handles base64-encoded bodies and malformed JSON (returns `{}`).
@@ -125,15 +123,14 @@ Unknown routes → `404 {error,routeKey}`. Any thrown error → `500 {error:"Int
 | Var | Default |
 |---|---|
 | `AWS_REGION` | `us-east-2` (auto) |
-| `TABLE_SESSIONS` | `pva_sessions` |
-| `TABLE_MESSAGE_FEEDBACK` | `pva_message_feedback` |
-| `TABLE_CONFIG` | `pva_config` |
-| `TABLE_SUGGESTIONS` | `pva_suggestions` |
+| `TABLE_NAME` | `RBPOCTable` |
+| `CONFIG_KEY` | `default` |
+| `SUGGESTIONS_LIMIT` | `5` |
 | `CONFIG_KEY` | `default` |
 | `SUGGESTIONS_LIMIT` | `5` |
 
 ### IAM (granted in template.yaml)
-DynamoDB CRUD on `pva_sessions` and `pva_message_feedback`; DynamoDB read on `pva_config` and `pva_suggestions`; basic Lambda logging.
+DynamoDB CRUD on `RBPOCTable`; basic Lambda logging.
 
 ### Notes
 - Timeout 30s, memory 256 MB.
@@ -143,15 +140,17 @@ DynamoDB CRUD on `pva_sessions` and `pva_message_feedback`; DynamoDB read on `pv
 
 ## 4. DynamoDB data model
 
-| Table | Key(s) | Written by | Fields |
-|---|---|---|---|
-| `pva_sessions` | `sessionId` | ApiFunction | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
-| `pva_messages` | `sessionId` + `ts` (N) | StreamFunction | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
-| `pva_message_feedback` | `sessionId` + `messageId` | ApiFunction | `rating`, `query`, `answer`, `createdAt` |
-| `pva_config` | `configKey` | seeded / read | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `csrPhone`, `feedbackReasons` |
-| `pva_suggestions` | `id` | seeded / read | `question`, `count` |
+One table (`RBPOCTable`), `PK` / `SK`. Every item also carries a `type` attribute.
 
-All tables are on-demand (pay-per-request). See `DEPLOYMENT.md` §1 for creation and §5 for seeding.
+| Item | PK / SK | Written by | Fields |
+|---|---|---|---|
+| Session | `SESSION#<sessionId>` / `SESSION` | ApiFunction | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
+| Q&A turn | `SESSION#<sessionId>` / `MSG#<ts>` | StreamFunction | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
+| Per-message feedback | `SESSION#<sessionId>` / `MSGFB#<messageId>` | ApiFunction | `rating`, `query`, `answer`, `createdAt`, `updatedAt` (re-vote updates in place) |
+| Config | `CONFIG` / `default` | seeded / read | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
+| Suggestion | `SUGGESTIONS` / `SUGG#<id>` | seeded / read | `id`, `question`, `count` |
+
+The table is on-demand (pay-per-request). See `DEPLOYMENT.md` §1 for creation and §5 for seeding.
 
 ---
 
@@ -162,7 +161,7 @@ sequenceDiagram
     participant B as Browser
     participant S as StreamFunction
     participant A as Bedrock AgentCore
-    participant D as DynamoDB (pva_messages)
+    participant D as DynamoDB (RBPOCTable)
 
     B->>S: POST { sessionId, text }
     S->>A: InvokeAgentRuntime(prompt, runtimeSessionId=sessionId)

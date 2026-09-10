@@ -1,0 +1,12 @@
+{
+  "version": "2.0",
+  "routeKey": "GET /suggestions",
+  "rawPath": "/suggestions",
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/suggestions"
+    }
+  },
+  "isBase64Encoded": false
+}

@@ -32,32 +32,30 @@ Install and configure these once:
 
 ---
 
-## 1. Create the DynamoDB tables (AWS Console UI)
+## 1. Create the DynamoDB table (AWS Console UI)
 
-Create **five** tables. For every table: **DynamoDB console → Tables → Create table**, fill in the keys below, under **Table settings** choose **Customize settings → Capacity mode → On-demand**, then **Create table**. Leave everything else default.
-
-| # | Table name | Partition key (type) | Sort key (type) | Written / read by |
-|---|---|---|---|---|
-| 1 | `pva_sessions` | `sessionId` (String) | — | Session feedback + summary (api-lambda) |
-| 2 | `pva_messages` | `sessionId` (String) | `ts` (Number) | Every Q&A turn (streaming-lambda) |
-| 3 | `pva_message_feedback` | `sessionId` (String) | `messageId` (String) | Per-message thumbs (api-lambda) |
-| 4 | `pva_config` | `configKey` (String) | — | Bot copy/config (api-lambda reads) |
-| 5 | `pva_suggestions` | `id` (String) | — | Suggested questions (api-lambda reads) |
-
-**Step-by-step for one table (repeat for all five):**
+Create **one** table with a generic composite key. Everything — config, suggestions, sessions, Q&A turns and feedback — lives in it, separated by key prefixes.
 
 1. Open the **DynamoDB** console in **us-east-2** (region selector, top-right).
 2. Click **Create table**.
-3. **Table name**: e.g. `pva_sessions`.
-4. **Partition key**: e.g. `sessionId`, type **String**.
-5. If the table has a sort key (tables 2 and 3), tick/enter the **Sort key**: `ts` (Number) for `pva_messages`, `messageId` (String) for `pva_message_feedback`.
+3. **Table name**: `RBPOCTable`.
+4. **Partition key**: `PK`, type **String**.
+5. **Sort key**: `SK`, type **String**.
 6. **Table settings** → **Customize settings**.
 7. **Read/write capacity settings** → **On-demand** (no capacity planning, pay-per-request).
 8. **Create table**. Wait until status = **Active**.
 
-You do **not** need to define any other attributes — DynamoDB is schemaless beyond the keys, and the Lambdas write the rest.
+You do **not** define any other attributes — DynamoDB is schemaless beyond `PK`/`SK`, and the Lambdas write the rest. The item layout (which key prefixes hold what) is:
 
-> The table names above are the SAM defaults. If you name them differently, pass the new names as SAM parameters in step 3.
+| Entity | PK | SK | Written by |
+|---|---|---|---|
+| Config singleton | `CONFIG` | `default` | seeded / api-lambda reads |
+| Suggestion | `SUGGESTIONS` | `SUGG#<id>` | seeded / api-lambda reads |
+| Session feedback + summary | `SESSION#<sessionId>` | `SESSION` | api-lambda |
+| Per-message feedback | `SESSION#<sessionId>` | `MSGFB#<messageId>` | api-lambda (update-in-place) |
+| Q&A turn | `SESSION#<sessionId>` | `MSG#<ts>` | streaming-lambda |
+
+> The table name `RBPOCTable` is the SAM default (the `TableName` parameter). If you name it differently, pass `--parameter-overrides TableName=<yourname>` at deploy.
 
 ---
 
@@ -88,7 +86,7 @@ sam deploy --guided
 - **Stack Name**: `personal-web-backend`
 - **AWS Region**: `us-east-2`
 - **Parameter AgentRuntimeArn**: paste your `arn:aws:bedrock-agentcore:us-east-2:...` ARN
-- **Parameter TableSessions / TableMessages / TableMessageFeedback / TableConfig / TableSuggestions**: press Enter to accept the defaults (or type your names)
+- **Parameter TableName**: press Enter to accept the default `RBPOCTable` (or type your table name)
 - **Confirm changes before deploy**: `Y`
 - **Allow SAM CLI IAM role creation**: `Y` (this creates the execution roles)
 - **Disable rollback**: `N`
@@ -132,21 +130,22 @@ You need:
 
 ---
 
-## 5. Seed `pva_config` and `pva_suggestions`
+## 5. Seed the config and suggestions rows
 
 The Lambda falls back to sensible defaults if these rows are missing, but seed them so you can edit copy without redeploying.
 
 **Config row** (one item; edit the text as you like):
 
 ```bash
-aws dynamodb put-item --region us-east-2 --table-name pva_config --item '{
-  "configKey": {"S": "default"},
+aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
+  "PK": {"S": "CONFIG"},
+  "SK": {"S": "default"},
+  "type": {"S": "CONFIG"},
   "botName": {"S": "Personal"},
   "greeting": {"S": "Hi, I am Personal, your Virtual Assistant. How can I help you today?"},
   "closing": {"S": "Thank you for using Personal. We value your trust in us. Please share your valuable feedback (thumbs up/thumbs down) to help us improve the experience."},
   "followUp": {"S": "Is there anything else I can help you with?"},
   "maxQuestionWords": {"N": "150"},
-  "csrPhone": {"S": "1-800-555-0142"},
   "feedbackReasons": {"L": [
     {"S": "Incorrect answer"}, {"S": "Not relevant"}, {"S": "Missing information"}, {"S": "Other"}
   ]}
@@ -156,15 +155,17 @@ aws dynamodb put-item --region us-east-2 --table-name pva_config --item '{
 **Suggestion rows** (repeat for each; `count` drives the top-5 ordering, highest first):
 
 ```bash
-aws dynamodb put-item --region us-east-2 --table-name pva_suggestions --item '{
+aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
+  "PK": {"S": "SUGGESTIONS"}, "SK": {"S": "SUGG#q1"}, "type": {"S": "SUGGESTION"},
   "id": {"S": "q1"}, "question": {"S": "How do I reset my password?"}, "count": {"N": "50"}
 }'
-aws dynamodb put-item --region us-east-2 --table-name pva_suggestions --item '{
+aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
+  "PK": {"S": "SUGGESTIONS"}, "SK": {"S": "SUGG#q2"}, "type": {"S": "SUGGESTION"},
   "id": {"S": "q2"}, "question": {"S": "Where can I view my statements?"}, "count": {"N": "35"}
 }'
 ```
 
-> You can also create these items in the console: **DynamoDB → Tables → (table) → Explore items → Create item → JSON view**.
+> You can also create these items in the console: **DynamoDB → Tables → `RBPOCTable` → Explore items → Create item → JSON view**.
 
 ---
 
@@ -234,8 +235,8 @@ You should see lines like `{"type":"start"}`, several `{"type":"token","text":".
 Verify writes landed in DynamoDB (console → Explore items, or):
 
 ```bash
-aws dynamodb get-item --region us-east-2 --table-name pva_sessions \
-  --key "{\"sessionId\":{\"S\":\"$SID\"}}"
+aws dynamodb get-item --region us-east-2 --table-name RBPOCTable \
+  --key "{\"PK\":{\"S\":\"SESSION#$SID\"},\"SK\":{\"S\":\"SESSION\"}}"
 ```
 
 ---
@@ -287,13 +288,15 @@ A full stack change (new route, IAM, env var, Function URL settings) still goes 
 
 ## 10. Data model reference
 
-| Table | Key(s) | Item fields |
-|---|---|---|
-| `pva_sessions` | `sessionId` | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
-| `pva_messages` | `sessionId` + `ts` | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
-| `pva_message_feedback` | `sessionId` + `messageId` | `rating`, `query`, `answer`, `createdAt` |
-| `pva_config` | `configKey` (`"default"`) | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `csrPhone`, `feedbackReasons` |
-| `pva_suggestions` | `id` | `question`, `count` |
+One table (`RBPOCTable`), keyed by `PK` / `SK`. Every item also carries a `type` attribute.
+
+| Item | PK | SK | Fields |
+|---|---|---|---|
+| Config | `CONFIG` | `default` | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
+| Suggestion | `SUGGESTIONS` | `SUGG#<id>` | `id`, `question`, `count` |
+| Session | `SESSION#<sessionId>` | `SESSION` | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
+| Per-message feedback | `SESSION#<sessionId>` | `MSGFB#<messageId>` | `rating`, `query`, `answer`, `createdAt`, `updatedAt` — a repeat vote updates this same item |
+| Q&A turn | `SESSION#<sessionId>` | `MSG#<ts>` | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
 
 The frontend owns `startedAt` / `endedAt` / `durationMs` / `messageCount` / `questionCount`; the backend stores them verbatim and never recomputes the duration.
 
@@ -307,7 +310,7 @@ The frontend owns `startedAt` / `endedAt` / `durationMs` / `messageCount` / `que
 - **`awslambda` is undefined locally:** that global only exists in the Lambda Node runtime; the streaming code runs on AWS, not locally.
 - **`AGENT_RUNTIME_ARN is not configured`** in the stream response → the parameter wasn't passed; redeploy with `--parameter-overrides AgentRuntimeArn=...`.
 - **AccessDenied on InvokeAgentRuntime** → the ARN passed at deploy doesn't match the agent, or the agent is in another region. Confirm the ARN and region.
-- **Empty `/suggestions`** → seed `pva_suggestions` (step 5). Empty is returned (and the UI hides the section) rather than erroring.
+- **Empty `/suggestions`** → seed the `SUGGESTIONS` items (step 5). Empty is returned (and the UI hides the section) rather than erroring.
 
 ---
 
@@ -420,7 +423,7 @@ echo "Base URL: https://${API_ID}.execute-api.us-east-2.amazonaws.com"
    - Allow methods: `POST`
    - Allow headers: `content-type`
 5. **Save**. Copy the **Function URL** (`https://<id>.lambda-url.us-east-2.on.aws/`) → this is `VITE_STREAM_URL`.
-6. Also set the function's **environment variables** (Configuration → Environment variables): `AGENT_RUNTIME_ARN`, `TABLE_MESSAGES`, and confirm its **execution role** allows `bedrock-agentcore:InvokeAgentRuntime` and DynamoDB writes to `pva_messages`.
+6. Also set the function's **environment variables** (Configuration → Environment variables): `AGENT_RUNTIME_ARN`, `TABLE_NAME`, and confirm its **execution role** allows `bedrock-agentcore:InvokeAgentRuntime` and DynamoDB writes to `RBPOCTable`.
 
 ### 12.5 Manual — streaming Lambda Function URL (CLI)
 
@@ -449,3 +452,48 @@ aws lambda get-function-url-config --region us-east-2 --function-name "$FN" \
 ### 12.6 Verify both
 
 Use the `curl` calls in **§7** against the two URLs. A successful `GET /config` and a streaming response (`{"type":"start"}` … `{"type":"done",...}`) confirm the API Gateway routes and the Function URL streaming mode are wired correctly.
+
+---
+
+## 13. Test a Lambda directly (without the UI)
+
+You don't need the frontend to exercise either Lambda. Ready-made API Gateway event payloads for all four routes live in `docs/events/`.
+
+**A. Local invoke with a sample event — api-lambda (needs Docker):**
+```bash
+sam build
+sam local invoke ApiFunction -e docs/events/get-config.json
+sam local invoke ApiFunction -e docs/events/get-suggestions.json
+sam local invoke ApiFunction -e docs/events/post-session-feedback.json
+sam local invoke ApiFunction -e docs/events/post-message-feedback.json
+```
+Local invoke still uses your AWS credentials to reach the **real** `RBPOCTable`, so create and seed it first (§1, §5) or the reads/writes will fail.
+
+**B. Local HTTP server — api-lambda (needs Docker):**
+```bash
+sam local start-api
+# in another shell:
+curl -s http://127.0.0.1:3000/config | jq .
+curl -s -X POST http://127.0.0.1:3000/sessions/$SID/feedback \
+  -H "content-type: application/json" \
+  -d '{"rating":"up","reasons":[],"other":"","messageCount":3,"questionCount":2}' | jq .
+```
+
+**C. Invoke the deployed function by name (either Lambda):**
+```bash
+aws lambda invoke --region us-east-2 \
+  --function-name <ApiFunctionPhysicalName> \
+  --cli-binary-format raw-in-base64-out \
+  --payload file://docs/events/get-config.json \
+  out.json && cat out.json
+```
+Get `<ApiFunctionPhysicalName>` from `aws cloudformation describe-stack-resources` (see §9).
+
+**D. Console Test tab:** Lambda console → the function → **Test** → paste one of `docs/events/*.json` → **Test**.
+
+**Streaming Lambda:** `sam local` does **not** emulate response streaming, and the `awslambda` global only exists on AWS, so options A/B don't apply to `StreamFunction`. Test it against its deployed Function URL:
+```bash
+curl -N -X POST "$STREAM" -H "content-type: application/json" \
+  -d "{\"sessionId\":\"$SID\",\"text\":\"hello\"}"
+```
+`aws lambda invoke-with-response-stream` also works but returns the whole stream at once rather than incrementally. Input validation is testable without the agent (empty `text` → an `error` event), but a real answer needs a valid `AGENT_RUNTIME_ARN` and Bedrock access.

@@ -15,5 +15,5 @@ resolve_s3 = true
 confirm_changeset = true
 # AgentRuntimeArn has no default — pass it at deploy time, e.g.:
 #   sam deploy --parameter-overrides AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<acct>:runtime/<id>
-# Table name overrides are optional (defaults match template.yaml):
-#   --parameter-overrides AgentRuntimeArn=... TableSessions=pva_sessions TableMessages=pva_messages ...
+# The table name override is optional (default matches template.yaml):
+#   --parameter-overrides AgentRuntimeArn=... TableName=RBPOCTable
