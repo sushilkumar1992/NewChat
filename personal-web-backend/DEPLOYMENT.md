@@ -491,9 +491,52 @@ Get `<ApiFunctionPhysicalName>` from `aws cloudformation describe-stack-resource
 
 **D. Console Test tab:** Lambda console → the function → **Test** → paste one of `docs/events/*.json` → **Test**.
 
-**Streaming Lambda:** `sam local` does **not** emulate response streaming, and the `awslambda` global only exists on AWS, so options A/B don't apply to `StreamFunction`. Test it against its deployed Function URL:
+### 13.1 Streaming Lambda — real test (deployed, no SAM)
+
+`sam local` can't emulate response streaming, and the `awslambda` global only exists on AWS, so the streaming Lambda is tested against the **deployed** function. Prereqs: the stack is deployed, `RBPOCTable` exists (§1), and (for a real answer) a valid `AGENT_RUNTIME_ARN` with Bedrock access. Set a session id first:
+
 ```bash
-curl -N -X POST "$STREAM" -H "content-type: application/json" \
-  -d "{\"sessionId\":\"$SID\",\"text\":\"hello\"}"
+SID="11111111-1111-4111-8111-111111111111"   # any UUID
 ```
-`aws lambda invoke-with-response-stream` also works but returns the whole stream at once rather than incrementally. Input validation is testable without the agent (empty `text` → an `error` event), but a real answer needs a valid `AGENT_RUNTIME_ARN` and Bedrock access.
+
+**Option 1 — through the Function URL (the exact path the frontend uses).** The URL is public (`AuthType NONE`), so this needs no credentials:
+
+```bash
+STREAM="https://xxxxxxxx.lambda-url.us-east-2.on.aws/"
+curl -N -X POST "$STREAM" -H "content-type: application/json" \
+  -d "{\"sessionId\":\"$SID\",\"text\":\"How do I reset my password?\"}"
+```
+Expect `{"type":"start"}`, streamed `{"type":"token","text":"..."}` lines, then `{"type":"done",...}`.
+
+**Option 2 — invoke the function directly with the AWS CLI (uses your `aws configure` credentials).**
+
+First find the deployed function's name:
+```bash
+aws lambda list-functions --region us-east-2 \
+  --query "Functions[?contains(FunctionName,'StreamFunction')].FunctionName" --output text
+```
+(or `aws cloudformation describe-stack-resources --stack-name personal-web-backend --region us-east-2` — see §9.)
+
+The handler reads `event.body`, so a **direct** invoke must wrap the request JSON inside a `body` string (mimicking a Function URL event). Put it in a file to avoid shell-quoting issues — this also works on Windows PowerShell/CMD:
+
+`stream-payload.json`:
+```json
+{ "body": "{\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"text\":\"How do I reset my password?\"}" }
+```
+
+Then stream the response into a file:
+```bash
+aws lambda invoke-with-response-stream --region us-east-2 \
+  --function-name <StreamFunctionName> \
+  --cli-binary-format raw-in-base64-out \
+  --payload file://stream-payload.json \
+  out.txt
+# view the NDJSON events:
+cat out.txt        # Windows:  type out.txt
+```
+
+**Notes:**
+- The `body`-wrapping matters **only** for the direct invoke (Option 2). The Function URL (Option 1) already delivers the event with `body` populated.
+- Input validation is testable **without** the agent — an empty `text` returns `{"type":"error","message":"sessionId and text are required"}`. A real streamed answer needs the agent.
+- `AccessDenied` on `InvokeAgentRuntime` → the `AGENT_RUNTIME_ARN` is wrong or in another region.
+- `aws lambda invoke` (buffered, no `-with-response-stream`) also works but returns the whole response at once instead of streaming.
