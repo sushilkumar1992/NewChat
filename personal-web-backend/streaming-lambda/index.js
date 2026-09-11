@@ -1,7 +1,9 @@
 "use strict";
 // Streaming Lambda (deployed behind a Lambda Function URL with InvokeMode=RESPONSE_STREAM).
 // It invokes a Bedrock AgentCore runtime, relays the agent's output to the browser as NDJSON,
-// and logs each Q&A turn to DynamoDB.
+// and records each Q&A turn as ITS OWN small item (PK=SESSION#<id>, SK=MSG#<messageId>) under
+// the session partition — the same item the per-message thumbs update. Item-per-message keeps
+// any one item well under DynamoDB's 400 KB limit while a whole session stays one Query away.
 //
 // NDJSON events written to the client (one JSON object per line, "\n"-separated):
 //   {"type":"start"}
@@ -15,7 +17,7 @@
 
 const { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } = require("@aws-sdk/client-bedrock-agentcore");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 
 const REGION = process.env.AWS_REGION || "us-east-2";
 const AGENT_RUNTIME_ARN = process.env.AGENT_RUNTIME_ARN;
@@ -26,11 +28,28 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
   marshallOptions: { removeUndefinedValues: true }
 });
 
-async function logMessage(record) {
+// Persists a Q&A turn as its own item (SK = MSG#<messageId>). A single UpdateItem that sets only
+// the Q&A fields, so it merges with (never clobbers) any feedbackRating the api-lambda wrote for
+// the same message. Best-effort — a failure must never break the stream.
+async function logMessage({ sessionId, messageId, question, answer, escalation, endSession }) {
+  const now = new Date().toISOString();
+  const ts = Date.now();
   try {
-    await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: record }));
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { PK: `SESSION#${sessionId}`, SK: `MSG#${messageId}` },
+      UpdateExpression:
+        "SET #t = :type, sessionId = :sid, messageId = :mid, question = :q, answer = :a, " +
+        "ts = :ts, escalation = :esc, endSession = :end, " +
+        "createdAt = if_not_exists(createdAt, :now), updatedAt = :now",
+      ExpressionAttributeNames: { "#t": "type" },
+      ExpressionAttributeValues: {
+        ":type": "MESSAGE", ":sid": sessionId, ":mid": messageId,
+        ":q": question, ":a": answer, ":ts": ts,
+        ":esc": escalation, ":end": endSession, ":now": now
+      }
+    }));
   } catch (e) {
-    // Logging is best-effort and must never break the stream.
     console.error("Failed to persist message to DynamoDB:", e);
   }
 }
@@ -50,6 +69,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
 
   let sessionId;
   let text;
+  let messageId;
   let fullAnswer = "";
   let escalation = false;
   let endSession = false;
@@ -58,6 +78,9 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     const body = JSON.parse(event.body || "{}");
     sessionId = body.sessionId || body.session_id;
     text = body.text || body.prompt || "";
+    // The frontend sends its message id so this turn is stored under the same key the
+    // per-message thumbs use. Fall back to a generated id if an older client omits it.
+    messageId = body.messageId || ("m" + Date.now().toString(36));
 
     if (!sessionId || !text) {
       httpResponse.write(JSON.stringify({ type: "error", message: "sessionId and text are required" }) + "\n");
@@ -122,19 +145,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
 
     httpResponse.write(JSON.stringify({ type: "done", escalation, endSession }) + "\n");
 
-    const ts = Date.now();
-    await logMessage({
-      PK: `SESSION#${sessionId}`,
-      SK: `MSG#${ts}`,
-      type: "MESSAGE",
-      sessionId,
-      ts,
-      question: text,
-      answer: fullAnswer,
-      escalation,
-      endSession,
-      createdAt: new Date().toISOString()
-    });
+    await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession });
   } catch (e) {
     console.error("StreamLambda error:", e);
     httpResponse.write(JSON.stringify({ type: "error", message: e.message || "Something went wrong." }) + "\n");

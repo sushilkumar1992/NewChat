@@ -9,14 +9,14 @@ if (!import.meta.env.VITE_STREAM_URL) {
   );
 }
 
-export async function streamMessage({ sessionId, text }, handlers = {}) {
+export async function streamMessage({ sessionId, text, messageId }, handlers = {}) {
   const { onStart, onToken, onDone, onError } = handlers;
   let res;
   try {
     res = await fetch(STREAM_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId, text })
+      body: JSON.stringify({ sessionId, text, messageId })
     });
   } catch (e) {
     onError && onError("Network error — please try again.");

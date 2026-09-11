@@ -75,7 +75,7 @@ export function useChat() {
       setMessages((prev) => [...prev, { id, role: "bot", text: "", ts: Date.now(), loading: true, streaming: true, answer: true, query: text }]);
 
       streamMessage(
-        { sessionId: sessionRef.current, text },
+        { sessionId: sessionRef.current, text, messageId: id },
         {
           onToken: (tok) => patch(id, (m) => ({ loading: false, text: m.text + tok })),
           onDone: (evt) => {

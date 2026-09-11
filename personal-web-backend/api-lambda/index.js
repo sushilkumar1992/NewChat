@@ -1,5 +1,5 @@
 "use strict";
-// API Lambda (behind API Gateway HTTP API). Single-table DynamoDB design.
+// API Lambda (behind API Gateway HTTP API). Single-table DynamoDB, item-per-message design.
 // Endpoints:
 //   GET  /config
 //   GET  /suggestions
@@ -10,16 +10,19 @@
 // carry no CORS headers. The client generates the sessionId; this Lambda only consumes it
 // (upsert-by-id) and never allocates one, and never recomputes the session duration.
 //
-// One DynamoDB table (TABLE_NAME) keyed by PK / SK:
+// One DynamoDB table (TABLE_NAME) keyed by PK / SK. Everything for a session shares one
+// partition (PK = SESSION#<sessionId>); the sort key splits it into small items so no single
+// item can hit the 400 KB limit, and one Query on the PK returns the whole session:
 //   PK = "CONFIG"               SK = <configKey>        -> config singleton
 //   PK = "SUGGESTIONS"          SK = "SUGG#<id>"        -> a suggestion
-//   PK = "SESSION#<sessionId>"  SK = "SESSION"          -> session feedback + summary
-//   PK = "SESSION#<sessionId>"  SK = "MSGFB#<messageId>"-> per-message feedback
-//   PK = "SESSION#<sessionId>"  SK = "MSG#<ts>"         -> Q&A turn (written by streaming-lambda)
+//   PK = "SESSION#<sessionId>"  SK = "META"             -> session summary/feedback (tiny item)
+//   PK = "SESSION#<sessionId>"  SK = "MSG#<messageId>"  -> ONE Q&A turn: question, answer, ts,
+//        escalation, endSession, feedbackRating, feedbackAt (Q&A written by streaming-lambda,
+//        thumbs written here). Every writer uses UpdateItem, so the two never clobber each other.
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const {
-  DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand
+  DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand
 } = require("@aws-sdk/lib-dynamodb");
 
 const REGION = process.env.AWS_REGION || "us-east-2";
@@ -89,46 +92,56 @@ async function getSuggestions() {
 
 async function postSessionFeedback(sessionId, body) {
   const now = new Date().toISOString();
-  // The frontend owns the record; store the values verbatim (no duration recompute).
-  const item = {
-    PK: `SESSION#${sessionId}`,
-    SK: "SESSION",
-    type: "SESSION",
-    sessionId,
-    rating: body.rating ?? null,
-    reasons: Array.isArray(body.reasons) ? body.reasons : [],
-    other: typeof body.other === "string" ? body.other : "",
-    startedAt: body.startedAt ?? null,
-    endedAt: body.endedAt ?? null,
-    durationMs: body.durationMs ?? null,
-    messageCount: body.messageCount ?? null,
-    questionCount: body.questionCount ?? null,
-    createdAt: now,
-    updatedAt: now
-  };
-  await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
+  // UpdateItem on the tiny META item (its own row under the session partition), so the summary
+  // never competes with the message items for the 400 KB budget. Values stored verbatim.
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE,
+    Key: { PK: `SESSION#${sessionId}`, SK: "META" },
+    UpdateExpression:
+      "SET #t = :type, sessionId = :sid, rating = :rating, reasons = :reasons, #o = :other, " +
+      "startedAt = :startedAt, endedAt = :endedAt, durationMs = :durationMs, " +
+      "messageCount = :messageCount, questionCount = :questionCount, " +
+      "createdAt = if_not_exists(createdAt, :now), updatedAt = :now",
+    ExpressionAttributeNames: { "#t": "type", "#o": "other" },
+    ExpressionAttributeValues: {
+      ":type": "SESSION_META",
+      ":sid": sessionId,
+      ":rating": body.rating ?? null,
+      ":reasons": Array.isArray(body.reasons) ? body.reasons : [],
+      ":other": typeof body.other === "string" ? body.other : "",
+      ":startedAt": body.startedAt ?? null,
+      ":endedAt": body.endedAt ?? null,
+      ":durationMs": body.durationMs ?? null,
+      ":messageCount": body.messageCount ?? null,
+      ":questionCount": body.questionCount ?? null,
+      ":now": now
+    }
+  }));
   return json(200, { ok: true });
 }
 
 async function postMessageFeedback(sessionId, body) {
   if (!body.messageId) return json(400, { error: "messageId is required" });
   const now = new Date().toISOString();
-  // Re-submittable: the item is keyed by (session, messageId), so a repeat vote for the
-  // same message UPDATES the same row instead of inserting a duplicate. `createdAt` is kept
-  // from the first vote; `updatedAt` moves each time. (`type`/`query` need alias names.)
+  // The thumbs live on the SAME per-message item the streaming-lambda writes (SK = MSG#<id>).
+  // One UpdateItem: it sets only feedback fields (+ seeds question/answer if the turn wasn't
+  // logged yet), so it merges with the Q&A without clobbering it. Re-vote updates in place.
   await ddb.send(new UpdateCommand({
     TableName: TABLE,
-    Key: { PK: `SESSION#${sessionId}`, SK: `MSGFB#${String(body.messageId)}` },
+    Key: { PK: `SESSION#${sessionId}`, SK: `MSG#${String(body.messageId)}` },
     UpdateExpression:
-      "SET #t = :type, sessionId = :sid, messageId = :mid, rating = :rating, #q = :query, answer = :answer, updatedAt = :now, createdAt = if_not_exists(createdAt, :now)",
-    ExpressionAttributeNames: { "#t": "type", "#q": "query" },
+      "SET #t = if_not_exists(#t, :type), sessionId = if_not_exists(sessionId, :sid), " +
+      "messageId = if_not_exists(messageId, :mid), question = if_not_exists(question, :query), " +
+      "answer = if_not_exists(answer, :answer), feedbackRating = :rating, feedbackAt = :now, " +
+      "createdAt = if_not_exists(createdAt, :now), updatedAt = :now",
+    ExpressionAttributeNames: { "#t": "type" },
     ExpressionAttributeValues: {
-      ":type": "MSG_FEEDBACK",
+      ":type": "MESSAGE",
       ":sid": sessionId,
       ":mid": String(body.messageId),
-      ":rating": body.rating ?? null,
       ":query": body.query ?? null,
       ":answer": body.answer ?? null,
+      ":rating": body.rating ?? null,
       ":now": now
     }
   }));

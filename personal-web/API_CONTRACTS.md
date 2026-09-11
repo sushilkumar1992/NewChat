@@ -124,7 +124,8 @@ Content-Type: application/json
 ```json
 {
   "sessionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "text": "How do I reset my password?"
+  "text": "How do I reset my password?",
+  "messageId": "m1a2b3c_4"
 }
 ```
 
@@ -132,6 +133,7 @@ Content-Type: application/json
 |---|---|---|
 | `sessionId` | string (UUID) | Client-generated. **Upsert** the session on first sight. |
 | `text` | string | The user's question (already word-capped client-side). |
+| `messageId` | string | The client id of the answer bubble this turn produces. The backend stores the Q&A under this key so the later per-message thumbs (which send the same `messageId`) attach to it. Optional — the backend generates one if omitted. |
 
 **Response** — streamed body
 

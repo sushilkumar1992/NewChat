@@ -43,9 +43,9 @@ Lambda **Function URL**, `AuthType: NONE`, `InvokeMode: RESPONSE_STREAM`, CORS `
 
 ### Request (event.body)
 ```json
-{ "sessionId": "f47ac10b-...-c3479", "text": "How do I reset my password?" }
+{ "sessionId": "f47ac10b-...-c3479", "text": "How do I reset my password?", "messageId": "m1a2b3c_4" }
 ```
-`session_id` / `prompt` are also accepted as aliases. Missing `sessionId` or `text` → a single `error` event and the stream closes.
+`session_id` / `prompt` are also accepted as aliases. `messageId` is the client id of the answer bubble; the turn is stored under it so the later thumbs attach to the same entry (a fallback id is generated if omitted). Missing `sessionId` or `text` → a single `error` event and the stream closes.
 
 ### Response (NDJSON, one JSON object per line)
 | Event | Shape | When |
@@ -68,7 +68,7 @@ The only response header set in code is `Content-Type: application/x-ndjson`. **
    - **Signal capture**: boolean `endSession` / `escalation` are read if present at the top level or under `obj.metadata`.
    - Each token is appended to `fullAnswer` and written as a `token` event.
 5. Write the `done` event carrying the captured `escalation` / `endSession`.
-6. Best-effort `PutCommand` into the table (`PK=SESSION#<sessionId>`, `SK=MSG#<ts>`, plus `type, sessionId, ts, question, answer, escalation, endSession, createdAt`). A DynamoDB failure is logged, never thrown.
+6. Best-effort **single `UpdateItem`** on the per-message item (`PK=SESSION#<sessionId>`, `SK=MSG#<messageId>`) setting `{ type, sessionId, messageId, question, answer, ts, escalation, endSession, createdAt (if_not_exists), updatedAt }`. It sets only the Q&A fields, so it merges with — never clobbers — any `feedbackRating` the api-lambda already wrote on that same item. A DynamoDB failure is logged, never thrown.
 7. `end()` the stream (also runs on the error path).
 
 ### End-of-session (important)
@@ -104,16 +104,16 @@ API Gateway **HTTP API** (payload format 2.0). Routing is by `event.routeKey`; t
 |---|---|---|---|
 | `GET /config` | `getConfig` | `GetItem` (`PK=CONFIG`, `SK=default`) | `200` config object (defaults merged under stored values) |
 | `GET /suggestions` | `getSuggestions` | `Query` (`PK=SUGGESTIONS`) | `200 {suggestions:[{id,question}]}` — top N by `count` desc |
-| `POST /sessions/{sessionId}/feedback` | `postSessionFeedback` | `PutItem` (`PK=SESSION#id`, `SK=SESSION`) | `200 {ok:true}` |
-| `POST /sessions/{sessionId}/messages/feedback` | `postMessageFeedback` | `UpdateItem` (`PK=SESSION#id`, `SK=MSGFB#messageId`) | `200 {ok:true}` (or `400` if `messageId` missing) — re-submittable, updates in place |
+| `POST /sessions/{sessionId}/feedback` | `postSessionFeedback` | `UpdateItem` on the `META` item (`SK=META`) — sets summary fields | `200 {ok:true}` |
+| `POST /sessions/{sessionId}/messages/feedback` | `postMessageFeedback` | `UpdateItem` on the message item (`SK=MSG#<messageId>`) → `feedbackRating` | `200 {ok:true}` (or `400` if `messageId` missing) — re-submittable, updates in place |
 
 Unknown routes → `404 {error,routeKey}`. Any thrown error → `500 {error:"Internal error"}` (logged).
 
 ### Behavior details
 - **`getConfig`** merges `DEFAULT_CONFIG` (mirrors the frontend fallback) with the stored row, so the endpoint returns valid copy even before the config row is seeded. A read failure logs and still returns defaults.
 - **`getSuggestions`** queries the `SUGGESTIONS` partition, filters rows with a `question`, sorts by numeric `count` descending, takes `SUGGESTIONS_LIMIT` (default 5), and maps to `{id, question}`. Any failure returns `{suggestions:[]}` (the UI then hides the section) rather than erroring.
-- **`postSessionFeedback`** writes the client-owned record **verbatim** (`rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`) plus server `createdAt`/`updatedAt`, at `PK=SESSION#<id>`, `SK=SESSION`. It does **not** recompute duration. `PutItem` is an upsert — the session row may not exist yet (there is no create call).
-- **`postMessageFeedback`** is **re-submittable**: it does an `UpdateItem` keyed by `PK=SESSION#<id>`, `SK=MSGFB#<messageId>`, so a repeat vote for the same message updates that same item (never a duplicate). `createdAt` is preserved via `if_not_exists`; `updatedAt` moves each time. `messageId` is required.
+- **`postSessionFeedback`** writes the client-owned record **verbatim** (`rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`) plus server `createdAt`/`updatedAt` onto the tiny `META` item (`SK=META`) via `UpdateItem`. It does **not** recompute duration; the item need not exist first (`UpdateItem` creates it). The `META` item is separate from the message items, so it can never approach the size limit.
+- **`postMessageFeedback`** is **re-submittable**: a **single `UpdateItem`** on the message item (`SK=MSG#<messageId>`) sets `feedbackRating` + `feedbackAt` (and seeds `question`/`answer` from the vote via `if_not_exists`, in case the turn wasn't logged yet). It touches only the feedback fields, so it merges with the Q&A the streaming-lambda wrote; a repeat vote updates in place (never a duplicate, no new item). `messageId` is required.
 
 ### Body & CORS handling
 - `parseBody` handles base64-encoded bodies and malformed JSON (returns `{}`).
@@ -140,13 +140,12 @@ DynamoDB CRUD on `RBPOCTable`; basic Lambda logging.
 
 ## 4. DynamoDB data model
 
-One table (`RBPOCTable`), `PK` / `SK`. Every item also carries a `type` attribute.
+One table (`RBPOCTable`), `PK` / `SK`. Every item carries a `type` attribute. A session is **many small items under one partition** (`PK = SESSION#<sessionId>`) — a tiny `META` item plus one item per Q&A turn — so no item can approach the 400 KB limit, and a whole session is one `Query PK = SESSION#<sessionId>` away.
 
 | Item | PK / SK | Written by | Fields |
 |---|---|---|---|
-| Session | `SESSION#<sessionId>` / `SESSION` | ApiFunction | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
-| Q&A turn | `SESSION#<sessionId>` / `MSG#<ts>` | StreamFunction | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
-| Per-message feedback | `SESSION#<sessionId>` / `MSGFB#<messageId>` | ApiFunction | `rating`, `query`, `answer`, `createdAt`, `updatedAt` (re-vote updates in place) |
+| Session meta | `SESSION#<sessionId>` / `META` | ApiFunction | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
+| Q&A turn (+thumbs) | `SESSION#<sessionId>` / `MSG#<messageId>` | both Lambdas | `question`, `answer`, `ts`, `escalation`, `endSession`, `feedbackRating`, `feedbackAt`, `createdAt`, `updatedAt` |
 | Config | `CONFIG` / `default` | seeded / read | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
 | Suggestion | `SUGGESTIONS` / `SUGG#<id>` | seeded / read | `id`, `question`, `count` |
 
@@ -171,7 +170,7 @@ sequenceDiagram
         S-->>B: {"type":"token","text":"..."}
     end
     S-->>B: {"type":"done", escalation, endSession}
-    S->>D: PutItem(question, answer, endSession, ...)
+    S->>D: UpdateItem MSG#<messageId> item = {question, answer, endSession, ...}
 ```
 
 ---

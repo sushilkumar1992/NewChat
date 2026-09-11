@@ -51,9 +51,16 @@ You do **not** define any other attributes — DynamoDB is schemaless beyond `PK
 |---|---|---|---|
 | Config singleton | `CONFIG` | `default` | seeded / api-lambda reads |
 | Suggestion | `SUGGESTIONS` | `SUGG#<id>` | seeded / api-lambda reads |
-| Session feedback + summary | `SESSION#<sessionId>` | `SESSION` | api-lambda |
-| Per-message feedback | `SESSION#<sessionId>` | `MSGFB#<messageId>` | api-lambda (update-in-place) |
-| Q&A turn | `SESSION#<sessionId>` | `MSG#<ts>` | streaming-lambda |
+| Session meta | `SESSION#<sessionId>` | `META` | api-lambda (UpdateItem) |
+| Q&A turn (+ its thumbs) | `SESSION#<sessionId>` | `MSG#<messageId>` | both Lambdas (UpdateItem) |
+
+Everything for a session shares the **same partition** `SESSION#<sessionId>`, split across small items so no single item can approach DynamoDB's 400 KB limit — and one `Query` on the PK returns the whole session (META + every message). The session summary/feedback is one tiny `META` item; each Q&A turn is its own `MSG#<messageId>` item holding the answer **and** its thumbs:
+
+```
+SESSION#<sessionId>
+  ├─ META             → rating, reasons, other, startedAt, endedAt, durationMs, messageCount, questionCount
+  └─ MSG#<messageId>  → question, answer, ts, escalation, endSession, feedbackRating, feedbackAt   (one item per turn)
+```
 
 > The table name `RBPOCTable` is the SAM default (the `TableName` parameter). If you name it differently, pass `--parameter-overrides TableName=<yourname>` at deploy.
 
@@ -235,8 +242,9 @@ You should see lines like `{"type":"start"}`, several `{"type":"token","text":".
 Verify writes landed in DynamoDB (console → Explore items, or):
 
 ```bash
-aws dynamodb get-item --region us-east-2 --table-name RBPOCTable \
-  --key "{\"PK\":{\"S\":\"SESSION#$SID\"},\"SK\":{\"S\":\"SESSION\"}}"
+aws dynamodb query --region us-east-2 --table-name RBPOCTable \
+  --key-condition-expression "PK = :p" \
+  --expression-attribute-values "{\":p\":{\"S\":\"SESSION#$SID\"}}"
 ```
 
 ---
@@ -288,17 +296,16 @@ A full stack change (new route, IAM, env var, Function URL settings) still goes 
 
 ## 10. Data model reference
 
-One table (`RBPOCTable`), keyed by `PK` / `SK`. Every item also carries a `type` attribute.
+One table (`RBPOCTable`), keyed by `PK` / `SK`. Every item carries a `type` attribute. A session is spread across small items under one partition (`PK = SESSION#<sessionId>`) — never one giant item — so it can grow without hitting the 400 KB per-item limit.
 
 | Item | PK | SK | Fields |
 |---|---|---|---|
 | Config | `CONFIG` | `default` | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
 | Suggestion | `SUGGESTIONS` | `SUGG#<id>` | `id`, `question`, `count` |
-| Session | `SESSION#<sessionId>` | `SESSION` | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
-| Per-message feedback | `SESSION#<sessionId>` | `MSGFB#<messageId>` | `rating`, `query`, `answer`, `createdAt`, `updatedAt` — a repeat vote updates this same item |
-| Q&A turn | `SESSION#<sessionId>` | `MSG#<ts>` | `question`, `answer`, `escalation`, `endSession`, `createdAt` |
+| Session meta | `SESSION#<sessionId>` | `META` | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
+| Q&A turn (+thumbs) | `SESSION#<sessionId>` | `MSG#<messageId>` | `question`, `answer`, `ts`, `escalation`, `endSession`, `feedbackRating`, `feedbackAt`, `createdAt`, `updatedAt` |
 
-The frontend owns `startedAt` / `endedAt` / `durationMs` / `messageCount` / `questionCount`; the backend stores them verbatim and never recomputes the duration.
+The streaming-lambda writes each Q&A turn to its own `MSG#<messageId>` item; the api-lambda writes the session summary to `META` and the thumbs to `MSG#<messageId>.feedbackRating` (re-vote updates in place). Every writer uses `UpdateItem` on disjoint fields, so the Q&A and the thumbs never clobber each other. Read a whole session with one `Query PK = SESSION#<sessionId>`. The frontend owns `startedAt` / `endedAt` / `durationMs` / `messageCount` / `questionCount`; the backend stores them verbatim and never recomputes the duration.
 
 ---
 
@@ -455,88 +462,56 @@ Use the `curl` calls in **§7** against the two URLs. A successful `GET /config`
 
 ---
 
-## 13. Test a Lambda directly (without the UI)
+## 13. Test the endpoints with curl (no UI)
 
-You don't need the frontend to exercise either Lambda. Ready-made API Gateway event payloads for all four routes live in `docs/events/`.
+Once the stack is deployed you have the two URLs from §4 — the **HTTP API base URL** and the **streaming Function URL**. With those you can exercise the whole backend straight from a terminal; the frontend is not required. Set them once, plus a client-style session id:
 
-**A. Local invoke with a sample event — api-lambda (needs Docker):**
 ```bash
-sam build
-sam local invoke ApiFunction -e docs/events/get-config.json
-sam local invoke ApiFunction -e docs/events/get-suggestions.json
-sam local invoke ApiFunction -e docs/events/post-session-feedback.json
-sam local invoke ApiFunction -e docs/events/post-message-feedback.json
+BASE="https://abc123.execute-api.us-east-2.amazonaws.com"   # HttpApiBaseUrl output
+STREAM="https://xxxxxxxx.lambda-url.us-east-2.on.aws/"       # StreamFunctionUrl output
+SID="11111111-1111-4111-8111-111111111111"                  # any UUID (the client normally generates this)
 ```
-Local invoke still uses your AWS credentials to reach the **real** `RBPOCTable`, so create and seed it first (§1, §5) or the reads/writes will fail.
 
-**B. Local HTTP server — api-lambda (needs Docker):**
+### API endpoints (behind the base URL)
+
 ```bash
-sam local start-api
-# in another shell:
-curl -s http://127.0.0.1:3000/config | jq .
-curl -s -X POST http://127.0.0.1:3000/sessions/$SID/feedback \
+# GET /config
+curl -s "$BASE/config" | jq .
+
+# GET /suggestions
+curl -s "$BASE/suggestions" | jq .
+
+# POST session feedback  (this is the session-end write)
+curl -s -X POST "$BASE/sessions/$SID/feedback" \
   -H "content-type: application/json" \
-  -d '{"rating":"up","reasons":[],"other":"","messageCount":3,"questionCount":2}' | jq .
+  -d '{"rating":"up","reasons":[],"other":"","startedAt":"2026-09-10T10:00:00.000Z","endedAt":"2026-09-10T10:03:20.000Z","durationMs":200000,"messageCount":6,"questionCount":3}' | jq .
+
+# POST per-message feedback  (run again with a different rating — it UPDATES the same row, no duplicate)
+curl -s -X POST "$BASE/sessions/$SID/messages/feedback" \
+  -H "content-type: application/json" \
+  -d '{"messageId":"m1","rating":"up","query":"How do I reset my password?","answer":"Open Settings > Security."}' | jq .
 ```
 
-**C. Invoke the deployed function by name (either Lambda):**
-```bash
-aws lambda invoke --region us-east-2 \
-  --function-name <ApiFunctionPhysicalName> \
-  --cli-binary-format raw-in-base64-out \
-  --payload file://docs/events/get-config.json \
-  out.json && cat out.json
-```
-Get `<ApiFunctionPhysicalName>` from `aws cloudformation describe-stack-resources` (see §9).
-
-**D. Console Test tab:** Lambda console → the function → **Test** → paste one of `docs/events/*.json` → **Test**.
-
-### 13.1 Streaming Lambda — real test (deployed, no SAM)
-
-`sam local` can't emulate response streaming, and the `awslambda` global only exists on AWS, so the streaming Lambda is tested against the **deployed** function. Prereqs: the stack is deployed, `RBPOCTable` exists (§1), and (for a real answer) a valid `AGENT_RUNTIME_ARN` with Bedrock access. Set a session id first:
+Each write returns `{"ok":true}`. Confirm a row actually landed in DynamoDB:
 
 ```bash
-SID="11111111-1111-4111-8111-111111111111"   # any UUID
+aws dynamodb query --region us-east-2 --table-name RBPOCTable \
+  --key-condition-expression "PK = :p" \
+  --expression-attribute-values "{\":p\":{\"S\":\"SESSION#$SID\"}}"
 ```
 
-**Option 1 — through the Function URL (the exact path the frontend uses).** The URL is public (`AuthType NONE`), so this needs no credentials:
+### Streaming endpoint (the streaming URL)
+
+`-N` disables curl's buffering so you see tokens as they arrive:
 
 ```bash
-STREAM="https://xxxxxxxx.lambda-url.us-east-2.on.aws/"
-curl -N -X POST "$STREAM" -H "content-type: application/json" \
+curl -N -X POST "$STREAM" \
+  -H "content-type: application/json" \
   -d "{\"sessionId\":\"$SID\",\"text\":\"How do I reset my password?\"}"
 ```
-Expect `{"type":"start"}`, streamed `{"type":"token","text":"..."}` lines, then `{"type":"done",...}`.
 
-**Option 2 — invoke the function directly with the AWS CLI (uses your `aws configure` credentials).**
+Expect `{"type":"start"}`, a series of `{"type":"token","text":"..."}` lines, then `{"type":"done","escalation":false,"endSession":false}`. Validation works even **without** the agent — send `"text":""` and you get `{"type":"error","message":"sessionId and text are required"}`. A real answer needs a valid `AGENT_RUNTIME_ARN` with Bedrock access (an `AccessDenied` on `InvokeAgentRuntime` means the ARN or region is wrong).
 
-First find the deployed function's name:
-```bash
-aws lambda list-functions --region us-east-2 \
-  --query "Functions[?contains(FunctionName,'StreamFunction')].FunctionName" --output text
-```
-(or `aws cloudformation describe-stack-resources --stack-name personal-web-backend --region us-east-2` — see §9.)
+### Windows note
 
-The handler reads `event.body`, so a **direct** invoke must wrap the request JSON inside a `body` string (mimicking a Function URL event). Put it in a file to avoid shell-quoting issues — this also works on Windows PowerShell/CMD:
-
-`stream-payload.json`:
-```json
-{ "body": "{\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"text\":\"How do I reset my password?\"}" }
-```
-
-Then stream the response into a file:
-```bash
-aws lambda invoke-with-response-stream --region us-east-2 \
-  --function-name <StreamFunctionName> \
-  --cli-binary-format raw-in-base64-out \
-  --payload file://stream-payload.json \
-  out.txt
-# view the NDJSON events:
-cat out.txt        # Windows:  type out.txt
-```
-
-**Notes:**
-- The `body`-wrapping matters **only** for the direct invoke (Option 2). The Function URL (Option 1) already delivers the event with `body` populated.
-- Input validation is testable **without** the agent — an empty `text` returns `{"type":"error","message":"sessionId and text are required"}`. A real streamed answer needs the agent.
-- `AccessDenied` on `InvokeAgentRuntime` → the `AGENT_RUNTIME_ARN` is wrong or in another region.
-- `aws lambda invoke` (buffered, no `-with-response-stream`) also works but returns the whole response at once instead of streaming.
+`curl` ships with Windows 10/11. In **PowerShell** the name `curl` is an alias for `Invoke-WebRequest`, so call **`curl.exe`** explicitly; and if inline single-quoted JSON is awkward, put the body in a file and pass `-d "@body.json"`.
