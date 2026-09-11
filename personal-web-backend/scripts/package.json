@@ -1,0 +1,11 @@
+{
+  "name": "rbpoc-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Utility scripts for the Personal VA backend (DynamoDB exports, etc.).",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1128.0",
+    "@aws-sdk/lib-dynamodb": "^3.1128.0"
+  }
+}

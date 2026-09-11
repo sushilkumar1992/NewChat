@@ -50,7 +50,7 @@ You do **not** define any other attributes — DynamoDB is schemaless beyond `PK
 | Entity | PK | SK | Written by |
 |---|---|---|---|
 | Config singleton | `CONFIG` | `default` | seeded / api-lambda reads |
-| Suggestion | `SUGGESTIONS` | `SUGG#<id>` | seeded / api-lambda reads |
+| Suggestions (all in one) | `SUGGESTIONS` | `ALL` | seeded / api-lambda reads |
 | Session meta | `SESSION#<sessionId>` | `META` | api-lambda (UpdateItem) |
 | Q&A turn (+ its thumbs) | `SESSION#<sessionId>` | `MSG#<messageId>` | both Lambdas (UpdateItem) |
 
@@ -159,16 +159,17 @@ aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
 }'
 ```
 
-**Suggestion rows** (repeat for each; `count` drives the top-5 ordering, highest first):
+**Suggestions** — all of them live in **one** item, in an `items` list (`count` drives the top-5 ordering, highest first):
 
 ```bash
 aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
-  "PK": {"S": "SUGGESTIONS"}, "SK": {"S": "SUGG#q1"}, "type": {"S": "SUGGESTION"},
-  "id": {"S": "q1"}, "question": {"S": "How do I reset my password?"}, "count": {"N": "50"}
-}'
-aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
-  "PK": {"S": "SUGGESTIONS"}, "SK": {"S": "SUGG#q2"}, "type": {"S": "SUGGESTION"},
-  "id": {"S": "q2"}, "question": {"S": "Where can I view my statements?"}, "count": {"N": "35"}
+  "PK": {"S": "SUGGESTIONS"},
+  "SK": {"S": "ALL"},
+  "type": {"S": "SUGGESTIONS"},
+  "items": {"L": [
+    {"M": {"id": {"S": "q1"}, "question": {"S": "How do I reset my password?"}, "count": {"N": "50"}}},
+    {"M": {"id": {"S": "q2"}, "question": {"S": "Where can I view my statements?"}, "count": {"N": "35"}}}
+  ]}
 }'
 ```
 
@@ -301,7 +302,7 @@ One table (`RBPOCTable`), keyed by `PK` / `SK`. Every item carries a `type` attr
 | Item | PK | SK | Fields |
 |---|---|---|---|
 | Config | `CONFIG` | `default` | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
-| Suggestion | `SUGGESTIONS` | `SUGG#<id>` | `id`, `question`, `count` |
+| Suggestions | `SUGGESTIONS` | `ALL` | `items`: a list of `{ id, question, count }` (all suggestions in one item) |
 | Session meta | `SESSION#<sessionId>` | `META` | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
 | Q&A turn (+thumbs) | `SESSION#<sessionId>` | `MSG#<messageId>` | `question`, `answer`, `ts`, `escalation`, `endSession`, `feedbackRating`, `feedbackAt`, `createdAt`, `updatedAt` |
 
@@ -317,7 +318,7 @@ The streaming-lambda writes each Q&A turn to its own `MSG#<messageId>` item; the
 - **`awslambda` is undefined locally:** that global only exists in the Lambda Node runtime; the streaming code runs on AWS, not locally.
 - **`AGENT_RUNTIME_ARN is not configured`** in the stream response → the parameter wasn't passed; redeploy with `--parameter-overrides AgentRuntimeArn=...`.
 - **AccessDenied on InvokeAgentRuntime** → the ARN passed at deploy doesn't match the agent, or the agent is in another region. Confirm the ARN and region.
-- **Empty `/suggestions`** → seed the `SUGGESTIONS` items (step 5). Empty is returned (and the UI hides the section) rather than erroring.
+- **Empty `/suggestions`** → seed the `SUGGESTIONS` / `ALL` item (step 5). Empty is returned (and the UI hides the section) rather than erroring.
 
 ---
 

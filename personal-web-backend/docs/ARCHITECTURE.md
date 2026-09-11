@@ -52,7 +52,7 @@ Lambda **Function URL**, `AuthType: NONE`, `InvokeMode: RESPONSE_STREAM`, CORS `
 |---|---|---|
 | start | `{"type":"start"}` | Immediately after the agent invocation opens. |
 | token | `{"type":"token","text":"..."}` | For each text delta parsed from the agent. |
-| done | `{"type":"done","escalation":false,"endSession":false}` | After the agent stream ends. |
+| done | `{"type":"done","escalation":false,"endSession":false,"images":null,"imageMode":null}` | After the agent stream ends. Carries any images the agent attached. |
 | error | `{"type":"error","message":"..."}` | On any failure (bad input, agent error). |
 
 The only response header set in code is `Content-Type: application/x-ndjson`. **CORS (and the `OPTIONS` preflight) is handled entirely by the Function URL's CORS config** — the handler must not set `Access-Control-*` headers too, or Lambda appends them to the URL-config headers and the browser sees a duplicate `Access-Control-Allow-Origin` (`*, *`) and rejects the response.
@@ -65,9 +65,9 @@ The only response header set in code is `Content-Type: application/x-ndjson`. **
    - Decode into a line buffer; process complete lines split on `\n`.
    - Only lines beginning `data:` are considered; the payload after `data:` is JSON-parsed.
    - **Token extraction** tries, in order: `obj.event.contentBlockDelta.delta.text`, `obj.delta.text`, `obj.text`, or the raw string. Non-JSON payloads are treated as raw text.
-   - **Signal capture**: boolean `endSession` / `escalation` are read if present at the top level or under `obj.metadata`.
+   - **Signal capture**: boolean `endSession` / `escalation`, plus `images` (array of `{url, caption}`) and `imageMode` (`single`|`stepper`|`stack`), are read if present at the top level or under `obj.metadata`. See `docs/agentcore-response.md` for the full agent contract.
    - Each token is appended to `fullAnswer` and written as a `token` event.
-5. Write the `done` event carrying the captured `escalation` / `endSession`.
+5. Write the `done` event carrying the captured `escalation` / `endSession` / `images` / `imageMode`.
 6. Best-effort **single `UpdateItem`** on the per-message item (`PK=SESSION#<sessionId>`, `SK=MSG#<messageId>`) setting `{ type, sessionId, messageId, question, answer, ts, escalation, endSession, createdAt (if_not_exists), updatedAt }`. It sets only the Q&A fields, so it merges with — never clobbers — any `feedbackRating` the api-lambda already wrote on that same item. A DynamoDB failure is logged, never thrown.
 7. `end()` the stream (also runs on the error path).
 
@@ -103,7 +103,7 @@ API Gateway **HTTP API** (payload format 2.0). Routing is by `event.routeKey`; t
 | routeKey | Handler | DynamoDB op | Response |
 |---|---|---|---|
 | `GET /config` | `getConfig` | `GetItem` (`PK=CONFIG`, `SK=default`) | `200` config object (defaults merged under stored values) |
-| `GET /suggestions` | `getSuggestions` | `Query` (`PK=SUGGESTIONS`) | `200 {suggestions:[{id,question}]}` — top N by `count` desc |
+| `GET /suggestions` | `getSuggestions` | `GetItem` (`PK=SUGGESTIONS`, `SK=ALL`) | `200 {suggestions:[{id,question}]}` — top N by `count` desc |
 | `POST /sessions/{sessionId}/feedback` | `postSessionFeedback` | `UpdateItem` on the `META` item (`SK=META`) — sets summary fields | `200 {ok:true}` |
 | `POST /sessions/{sessionId}/messages/feedback` | `postMessageFeedback` | `UpdateItem` on the message item (`SK=MSG#<messageId>`) → `feedbackRating` | `200 {ok:true}` (or `400` if `messageId` missing) — re-submittable, updates in place |
 
@@ -111,7 +111,7 @@ Unknown routes → `404 {error,routeKey}`. Any thrown error → `500 {error:"Int
 
 ### Behavior details
 - **`getConfig`** merges `DEFAULT_CONFIG` (mirrors the frontend fallback) with the stored row, so the endpoint returns valid copy even before the config row is seeded. A read failure logs and still returns defaults.
-- **`getSuggestions`** queries the `SUGGESTIONS` partition, filters rows with a `question`, sorts by numeric `count` descending, takes `SUGGESTIONS_LIMIT` (default 5), and maps to `{id, question}`. Any failure returns `{suggestions:[]}` (the UI then hides the section) rather than erroring.
+- **`getSuggestions`** does a single `GetItem` on the one `SUGGESTIONS`/`ALL` item, reads its `items` list, filters entries with a `question`, sorts by numeric `count` descending, takes `SUGGESTIONS_LIMIT` (default 5), and maps to `{id, question}`. Any failure (or a missing item) returns `{suggestions:[]}` (the UI then hides the section) rather than erroring.
 - **`postSessionFeedback`** writes the client-owned record **verbatim** (`rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`) plus server `createdAt`/`updatedAt` onto the tiny `META` item (`SK=META`) via `UpdateItem`. It does **not** recompute duration; the item need not exist first (`UpdateItem` creates it). The `META` item is separate from the message items, so it can never approach the size limit.
 - **`postMessageFeedback`** is **re-submittable**: a **single `UpdateItem`** on the message item (`SK=MSG#<messageId>`) sets `feedbackRating` + `feedbackAt` (and seeds `question`/`answer` from the vote via `if_not_exists`, in case the turn wasn't logged yet). It touches only the feedback fields, so it merges with the Q&A the streaming-lambda wrote; a repeat vote updates in place (never a duplicate, no new item). `messageId` is required.
 
@@ -147,7 +147,7 @@ One table (`RBPOCTable`), `PK` / `SK`. Every item carries a `type` attribute. A 
 | Session meta | `SESSION#<sessionId>` / `META` | ApiFunction | `rating`, `reasons`, `other`, `startedAt`, `endedAt`, `durationMs`, `messageCount`, `questionCount`, `createdAt`, `updatedAt` |
 | Q&A turn (+thumbs) | `SESSION#<sessionId>` / `MSG#<messageId>` | both Lambdas | `question`, `answer`, `ts`, `escalation`, `endSession`, `feedbackRating`, `feedbackAt`, `createdAt`, `updatedAt` |
 | Config | `CONFIG` / `default` | seeded / read | `botName`, `greeting`, `closing`, `followUp`, `maxQuestionWords`, `feedbackReasons` |
-| Suggestion | `SUGGESTIONS` / `SUGG#<id>` | seeded / read | `id`, `question`, `count` |
+| Suggestions | `SUGGESTIONS` / `ALL` | seeded / read | `items`: list of `{ id, question, count }` (all in one item) |
 
 The table is on-demand (pay-per-request). See `DEPLOYMENT.md` §1 for creation and §5 for seeding.
 

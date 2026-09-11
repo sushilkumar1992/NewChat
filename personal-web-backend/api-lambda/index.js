@@ -14,7 +14,7 @@
 // partition (PK = SESSION#<sessionId>); the sort key splits it into small items so no single
 // item can hit the 400 KB limit, and one Query on the PK returns the whole session:
 //   PK = "CONFIG"               SK = <configKey>        -> config singleton
-//   PK = "SUGGESTIONS"          SK = "SUGG#<id>"        -> a suggestion
+//   PK = "SUGGESTIONS"          SK = "ALL"              -> ALL suggestions in one item: { items: [{id,question,count}] }
 //   PK = "SESSION#<sessionId>"  SK = "META"             -> session summary/feedback (tiny item)
 //   PK = "SESSION#<sessionId>"  SK = "MSG#<messageId>"  -> ONE Q&A turn: question, answer, ts,
 //        escalation, endSession, feedbackRating, feedbackAt (Q&A written by streaming-lambda,
@@ -22,12 +22,13 @@
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const {
-  DynamoDBDocumentClient, GetCommand, QueryCommand, UpdateCommand
+  DynamoDBDocumentClient, GetCommand, UpdateCommand
 } = require("@aws-sdk/lib-dynamodb");
 
 const REGION = process.env.AWS_REGION || "us-east-2";
 const TABLE = process.env.TABLE_NAME || "RBPOCTable";
 const CONFIG_KEY = process.env.CONFIG_KEY || "default";
+const SUGGESTIONS_SK = process.env.SUGGESTIONS_SK || "ALL";
 const SUGGESTIONS_LIMIT = Number(process.env.SUGGESTIONS_LIMIT || 5);
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
@@ -73,12 +74,10 @@ async function getConfig() {
 
 async function getSuggestions() {
   try {
-    const res = await ddb.send(new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: "PK = :p",
-      ExpressionAttributeValues: { ":p": "SUGGESTIONS" }
-    }));
-    const items = (res.Items || [])
+    // All suggestions live in ONE item ({ items: [{id, question, count}] }).
+    const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { PK: "SUGGESTIONS", SK: SUGGESTIONS_SK } }));
+    const list = res.Item && Array.isArray(res.Item.items) ? res.Item.items : [];
+    const items = list
       .filter((s) => s && s.question)
       .sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0))
       .slice(0, SUGGESTIONS_LIMIT)

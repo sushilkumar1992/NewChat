@@ -8,7 +8,7 @@
 // NDJSON events written to the client (one JSON object per line, "\n"-separated):
 //   {"type":"start"}
 //   {"type":"token","text":"..."}          (many)
-//   {"type":"done","escalation":false,"endSession":false}
+//   {"type":"done","escalation":false,"endSession":false,"images":null,"imageMode":null}
 //   {"type":"error","message":"..."}
 //
 // End-of-session is the LLM's decision: if the agent emits a structured event carrying
@@ -73,6 +73,8 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   let fullAnswer = "";
   let escalation = false;
   let endSession = false;
+  let images = null;      // [{ url, caption? }, ...] from the agent, relayed on `done`
+  let imageMode = null;   // "single" | "stepper" | "stack"
 
   try {
     const body = JSON.parse(event.body || "{}");
@@ -125,12 +127,15 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
             obj?.text ??
             (typeof obj === "string" ? obj : null);
 
-          // The agent (LLM) may signal end-of-session / escalation via structured fields.
-          if (typeof obj?.endSession === "boolean") endSession = obj.endSession;
-          if (typeof obj?.escalation === "boolean") escalation = obj.escalation;
-          if (obj?.metadata) {
-            if (typeof obj.metadata.endSession === "boolean") endSession = obj.metadata.endSession;
-            if (typeof obj.metadata.escalation === "boolean") escalation = obj.metadata.escalation;
+          // The agent (LLM) may signal end-of-session / escalation and attach images via
+          // structured fields — at the top level or under `metadata`. Latest value wins.
+          const src = [obj, obj && obj.metadata];
+          for (const o of src) {
+            if (!o || typeof o !== "object") continue;
+            if (typeof o.endSession === "boolean") endSession = o.endSession;
+            if (typeof o.escalation === "boolean") escalation = o.escalation;
+            if (Array.isArray(o.images)) images = o.images;
+            if (typeof o.imageMode === "string") imageMode = o.imageMode;
           }
         } catch {
           tokenText = payload;
@@ -143,7 +148,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
       }
     }
 
-    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession }) + "\n");
+    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, images, imageMode }) + "\n");
 
     await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession });
   } catch (e) {
