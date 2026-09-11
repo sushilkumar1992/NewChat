@@ -1,0 +1,17 @@
+async def stream():
+    full_reply = []
+    async for event in agent.stream_async(user_message):
+        if "data" in event:
+            chunk = event["data"]
+            full_reply.append(chunk)
+            yield chunk                    # unchanged — data: <text>
+    reply_text = "".join(full_reply)
+
+    # +++ NEW
+    images, image_mode = build_images(user_message, reply_text, agent)
+    signal = {"endSession": ..., "escalation": ...}
+    if images:
+        signal["images"] = images          # [{"url","caption"}]
+        signal["imageMode"] = image_mode    # single | stepper | stack
+    yield signal                           # dict -> data: {json}  (Lambda relays to UI)
+    return stream()
