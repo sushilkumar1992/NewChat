@@ -6,17 +6,45 @@ function timeStr(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// Renders text with <br> for newlines (text is plain; React escapes it).
+// Splits a plain string on "\n" into text + <br> nodes (React escapes the text).
+function withBreaks(str, keyPrefix) {
+  const lines = String(str).split("\n");
+  return lines.map((line, i) => (
+    <span key={keyPrefix + "-" + i}>
+      {line}
+      {i < lines.length - 1 && <br />}
+    </span>
+  ));
+}
+
+// Renders streamed answer text: **bold** -> <strong>, "\n" -> <br> (text stays
+// plain — React escapes it, so this is not raw HTML).
+//
+// The FULL accumulated text is re-parsed on every token, so a "**...**" pair whose
+// markers arrive in different chunks (opening "**" now, closing "**" several tokens
+// later) resolves the moment both are present — no cross-chunk buffering needed here.
+// Splitting on "**" makes odd-indexed segments bold; a still-open "**" (no closing
+// yet) therefore renders its text bold live as more tokens stream in. While streaming
+// we also hide a lone trailing "*" (the first half of a not-yet-complete "**") so a
+// single asterisk never flashes for one frame between chunks.
+function renderRich(text, streaming) {
+  let src = String(text);
+  if (streaming) {
+    const m = src.match(/\*+$/);              // trailing run of "*"
+    if (m && m[0].length % 2 === 1) src = src.slice(0, -1); // odd -> last one is a half-typed marker
+  }
+  const segments = src.split("**");           // odd indices = bold (closed, or open while streaming)
+  return segments.map((seg, i) =>
+    i % 2 === 1
+      ? <strong key={"b" + i}>{withBreaks(seg, "b" + i)}</strong>
+      : <span key={"n" + i}>{withBreaks(seg, "n" + i)}</span>
+  );
+}
+
 function TextBody({ text, streaming }) {
-  const parts = String(text).split("\n");
   return (
     <>
-      {parts.map((line, i) => (
-        <span key={i}>
-          {line}
-          {i < parts.length - 1 && <br />}
-        </span>
-      ))}
+      {renderRich(text, streaming)}
       {streaming && <span className="caret" />}
     </>
   );
