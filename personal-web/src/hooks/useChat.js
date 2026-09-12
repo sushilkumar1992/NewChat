@@ -53,7 +53,9 @@ export function useChat() {
 
   const askAnythingElse = useCallback(() => {
     if (endedRef.current) return;
-    addBot(config.followUp);
+    // Follow-up prompt ("Is there anything else I can help you with?") is hidden for
+    // now — intentionally a no-op. Restore by re-enabling the line below.
+    // addBot(config.followUp);
   }, [config.followUp, addBot]);
 
   // Ends the session UI: appends the closing message and opens the feedback panel.
