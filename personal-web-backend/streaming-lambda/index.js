@@ -14,6 +14,12 @@
 // End-of-session is the LLM's decision: if the agent emits a structured event carrying
 // boolean `endSession` / `escalation` fields, we forward them on the `done` event. If it
 // never does, they default to false and the user can still end via the "End chat" button.
+//
+// Chunk handling: the agent response arrives as bytes, so a chunk can split a line mid-way and
+// the last line can arrive with no trailing "\n". We (1) buffer until a full "\n" to reassemble
+// split lines, (2) flush the decoder and process the final partial line so the last event is
+// never lost, and (3) preserve each token's whitespace (only a trailing CR and one SSE leading
+// space are stripped) so words are never glued together at chunk boundaries.
 
 const { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } = require("@aws-sdk/client-bedrock-agentcore");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
@@ -95,6 +101,8 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
       return;
     }
 
+    console.log("AGENTCORE_REQUEST", event);
+
     const cmd = new InvokeAgentRuntimeCommand({
       agentRuntimeArn: AGENT_RUNTIME_ARN,
       runtimeSessionId: sessionId,
@@ -108,45 +116,61 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    console.log("AGENTCORE_RESPONSE", agentResponse.response);
+
+    // Process one COMPLETE line (already reassembled across chunk boundaries). We preserve the
+    // token's own whitespace: only a trailing CR and, per SSE, one leading space are removed.
+    const processLine = (rawLine) => {
+      const line = rawLine.replace(/\r$/, "");
+      if (!line.startsWith("data:")) return;
+      let payload = line.slice(5);                              // everything after "data:"
+      if (payload.startsWith(" ")) payload = payload.slice(1);  // SSE: drop exactly ONE leading space
+      if (payload === "") return;                               // empty data line / keep-alive
+      if (payload.trim() === "[DONE]") return;
+
+      let tokenText = null;
+      try {
+        const obj = JSON.parse(payload);                        // JSON.parse tolerates surrounding whitespace
+        tokenText =
+          obj?.event?.contentBlockDelta?.delta?.text ??
+          obj?.delta?.text ??
+          obj?.text ??
+          (typeof obj === "string" ? obj : null);
+
+        // The agent (LLM) may signal end-of-session / escalation and attach images via
+        // structured fields — at the top level or under `metadata`. Latest value wins.
+        const src = [obj, obj && obj.metadata];
+        for (const o of src) {
+          if (!o || typeof o !== "object") continue;
+          if (typeof o.endSession === "boolean") endSession = o.endSession;
+          if (typeof o.escalation === "boolean") escalation = o.escalation;
+          if (Array.isArray(o.images)) images = o.images;
+          if (typeof o.imageMode === "string") imageMode = o.imageMode;
+        }
+      } catch {
+        tokenText = payload;                                    // raw text token — whitespace preserved
+      }
+
+      if (tokenText) {
+        fullAnswer += tokenText;
+        httpResponse.write(JSON.stringify({ type: "token", text: tokenText }) + "\n");
+      }
+    };
+
     for await (const chunk of agentResponse.response) {
-      buffer += decoder.decode(chunk, { stream: true });
+      console.log("AGENTCORE_RESPONSE_CHUNK", chunk);
+
+      buffer += decoder.decode(chunk, { stream: true });        // a chunk may split a line mid-way
       let idx;
       while ((idx = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, idx).trim();
+        processLine(buffer.slice(0, idx));
         buffer = buffer.slice(idx + 1);
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(line.indexOf(":") + 1).trim();
-        if (!payload || payload === "[DONE]") continue;
-
-        let tokenText = null;
-        try {
-          const obj = JSON.parse(payload);
-          tokenText =
-            obj?.event?.contentBlockDelta?.delta?.text ??
-            obj?.delta?.text ??
-            obj?.text ??
-            (typeof obj === "string" ? obj : null);
-
-          // The agent (LLM) may signal end-of-session / escalation and attach images via
-          // structured fields — at the top level or under `metadata`. Latest value wins.
-          const src = [obj, obj && obj.metadata];
-          for (const o of src) {
-            if (!o || typeof o !== "object") continue;
-            if (typeof o.endSession === "boolean") endSession = o.endSession;
-            if (typeof o.escalation === "boolean") escalation = o.escalation;
-            if (Array.isArray(o.images)) images = o.images;
-            if (typeof o.imageMode === "string") imageMode = o.imageMode;
-          }
-        } catch {
-          tokenText = payload;
-        }
-
-        if (tokenText) {
-          fullAnswer += tokenText;
-          httpResponse.write(JSON.stringify({ type: "token", text: tokenText }) + "\n");
-        }
       }
     }
+    // Flush the decoder and process the final line, which may arrive WITHOUT a trailing "\n"
+    // (otherwise the last event — e.g. the images/endSession signal — would be lost).
+    buffer += decoder.decode();
+    if (buffer.trim()) processLine(buffer);
 
     httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, images, imageMode }) + "\n");
 
