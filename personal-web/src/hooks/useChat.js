@@ -74,32 +74,42 @@ export function useChat() {
       setBusy(true);
       busyRef.current = true;
       const id = mkId();
-      setMessages((prev) => [...prev, { id, role: "bot", text: "", ts: Date.now(), loading: true, streaming: true, answer: true, query: text }]);
+      // A bot answer is an ORDERED list of content blocks so images render inline at the
+      // position they stream in: [{type:"text",text}, {type:"images",images,imageMode}, ...].
+      // `text` still holds the full concatenated answer text (used for feedback + the record).
+      setMessages((prev) => [...prev, { id, role: "bot", text: "", blocks: [], ts: Date.now(), loading: true, streaming: true, answer: true, query: text }]);
 
       streamMessage(
         { sessionId: sessionRef.current, text, messageId: id },
         {
-          onToken: (tok) => patch(id, (m) => ({ loading: false, text: m.text + tok })),
+          onToken: (tok) => patch(id, (m) => {
+            // Append to the trailing text block, or open a new one after an image block.
+            const blocks = m.blocks ? m.blocks.slice() : [];
+            const last = blocks[blocks.length - 1];
+            if (last && last.type === "text") blocks[blocks.length - 1] = { ...last, text: last.text + tok };
+            else blocks.push({ type: "text", text: tok });
+            return { loading: false, text: (m.text || "") + tok, blocks };
+          }),
+          onImage: (evt) => patch(id, (m) => {
+            // Drop an image block at the current stream position (between text, or at the end).
+            const blocks = m.blocks ? m.blocks.slice() : [];
+            blocks.push({ type: "images", images: evt.images || [], imageMode: evt.imageMode || "single" });
+            return { loading: false, blocks };
+          }),
           onDone: (evt) => {
-            patch(id, {
-              loading: false,
-              streaming: false,
-              images: evt.images || null,
-              imageMode: evt.imageMode || null,
-              escalation: !!evt.escalation,
-              ts: Date.now()
-            });
+            patch(id, { loading: false, streaming: false, escalation: !!evt.escalation, ts: Date.now() });
             setBusy(false);
             busyRef.current = false;
             // The backend LLM decides whether this turn ends the session.
             if (evt.endSession) {
               // Closing turn: this bubble is not a rateable Q&A answer. Drop it if it
-              // carried no text/images, otherwise keep it but unflag it as an answer.
+              // carried no text and no images, otherwise keep it but unflag it as an answer.
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last && last.id === id) {
-                  const empty = !String(last.text).trim() && !(last.images && last.images.length);
-                  if (empty) return prev.slice(0, -1);
+                  const hasText = String(last.text || "").trim() !== "";
+                  const hasImages = (last.blocks || []).some((b) => b.type === "images" && b.images && b.images.length);
+                  if (!hasText && !hasImages) return prev.slice(0, -1);
                   return prev.map((m) => (m.id === id ? { ...m, answer: false } : m));
                 }
                 return prev;

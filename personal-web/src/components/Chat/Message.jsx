@@ -94,7 +94,16 @@ export default function Message({ m, onRate }) {
     );
   }
 
-  // bot
+  // bot — render an ordered list of blocks (text / images) so images appear inline at the
+  // position they streamed in. Falls back to a single text block for messages that carry only
+  // `text` (greeting, closing, and older records without blocks).
+  const blocks = (m.blocks && m.blocks.length)
+    ? m.blocks
+    : (m.text ? [{ type: "text", text: m.text }] : []);
+  // Index of the last TEXT block — the streaming caret lives there so it trails the answer.
+  let lastTextIdx = -1;
+  blocks.forEach((b, i) => { if (b.type === "text") lastTextIdx = i; });
+
   return (
     <div className="msg msg--bot">
       <img
@@ -109,15 +118,24 @@ export default function Message({ m, onRate }) {
         }}
       />
       <div className="msg__col">
-        <div className="bubble" style={m.loading ? { padding: 0 } : undefined}>
-          {m.loading ? <TypingIndicator /> : <TextBody text={m.text} streaming={m.streaming} />}
-        </div>
-        {!m.loading && !m.streaming && <div className="msg__time">{timeStr(m.ts)}</div>}
-        {m.images && m.images.length > 0 && (
-          <div className="msg__images">
-            <BotImages images={m.images} mode={m.imageMode || "single"} />
-          </div>
+        {m.loading ? (
+          <div className="bubble" style={{ padding: 0 }}><TypingIndicator /></div>
+        ) : (
+          blocks.map((b, i) =>
+            b.type === "images" ? (
+              (b.images && b.images.length > 0) ? (
+                <div className="msg__images" key={i}>
+                  <BotImages images={b.images} mode={b.imageMode || "single"} />
+                </div>
+              ) : null
+            ) : (
+              <div className="bubble" key={i}>
+                <TextBody text={b.text} streaming={m.streaming && i === lastTextIdx} />
+              </div>
+            )
+          )
         )}
+        {!m.loading && !m.streaming && <div className="msg__time">{timeStr(m.ts)}</div>}
         {config.messageFeedback && !m.loading && !m.streaming && m.answer && (
           <MsgFeedback m={m} onRate={onRate} />
         )}

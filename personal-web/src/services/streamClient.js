@@ -1,6 +1,9 @@
 // Consumes the streaming Lambda Function URL (POST /messages) and dispatches
-// NDJSON events: {type:"start"} {type:"token",text} {type:"done",images?,imageMode?,escalation?,endSession?} {type:"error",message}.
-// Loading is server-driven: the caller shows the typing indicator until the first `token`.
+// NDJSON events: {type:"start"} {type:"token",text} {type:"image",images,imageMode}
+//                {type:"done",escalation?,endSession?} {type:"error",message}.
+// `image` events arrive IN STREAM ORDER (between tokens and/or at the end); the caller
+// renders each at the position it arrives. Loading is server-driven: the caller shows the
+// typing indicator until the first `token` or `image`.
 const STREAM_URL = (import.meta.env.VITE_STREAM_URL || "").replace(/\/$/, "") + "/";
 if (!import.meta.env.VITE_STREAM_URL) {
   console.warn(
@@ -10,7 +13,7 @@ if (!import.meta.env.VITE_STREAM_URL) {
 }
 
 export async function streamMessage({ sessionId, text, messageId }, handlers = {}) {
-  const { onStart, onToken, onDone, onError } = handlers;
+  const { onStart, onToken, onImage, onDone, onError } = handlers;
   let res;
   try {
     res = await fetch(STREAM_URL, {
@@ -38,6 +41,7 @@ export async function streamMessage({ sessionId, text, messageId }, handlers = {
     try { evt = JSON.parse(trimmed); } catch (e) { return; }
     if (evt.type === "start") onStart && onStart(evt);
     else if (evt.type === "token") onToken && onToken(evt.text || "");
+    else if (evt.type === "image") onImage && onImage(evt);
     else if (evt.type === "done") onDone && onDone(evt);
     else if (evt.type === "error") onError && onError(evt.message || "Something went wrong.");
   };

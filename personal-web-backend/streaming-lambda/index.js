@@ -7,13 +7,23 @@
 //
 // NDJSON events written to the client (one JSON object per line, "\n"-separated):
 //   {"type":"start"}
-//   {"type":"token","text":"..."}          (many)
-//   {"type":"done","escalation":false,"endSession":false,"images":null,"imageMode":null}
+//   {"type":"token","text":"..."}                           (many)
+//   {"type":"image","images":[{url,caption?}],"imageMode":"single|stepper|stack"}  (0..n, IN ORDER)
+//   {"type":"done","escalation":false,"endSession":false}
 //   {"type":"error","message":"..."}
 //
-// End-of-session is the LLM's decision: if the agent emits a structured event carrying
-// boolean `endSession` / `escalation` fields, we forward them on the `done` event. If it
-// never does, they default to false and the user can still end via the "End chat" button.
+// Images are streamed INLINE: the moment a line yields an image payload we emit an `image`
+// event at that position in the stream, so the UI renders it exactly where it arrived —
+// between text, or at the end. (Previously images were deferred to a single `done` event and
+// always rendered at the bottom.) A payload may be a clean standalone line
+// (`data: {"images":[...],"imageMode":"stepper"}`) OR a JSON object glued onto a text line
+// (`data: Here's your statement. {"images":[...],"imageMode":"single"}`); both are handled —
+// in the glued case the text part is emitted as a token and the image part as an `image` event.
+// Identical consecutive image payloads are de-duplicated, so an agent that repeats the same
+// block mid-stream and again at the end renders it only once.
+//
+// End-of-session is the LLM's decision: booleans `endSession` / `escalation` (top level or under
+// `metadata`) are captured wherever they appear and forwarded on the `done` event.
 //
 // Chunk handling: the agent response arrives as bytes, so a chunk can split a line mid-way and
 // the last line can arrive with no trailing "\n". We (1) buffer until a full "\n" to reassemble
@@ -60,6 +70,46 @@ async function logMessage({ sessionId, messageId, question, answer, escalation, 
   }
 }
 
+// Scans a string for the FIRST balanced {...} substring that parses as JSON AND looks like an
+// agent signal (carries images / imageMode / endSession / escalation / metadata). Used to peel an
+// image (or flags) object off a line that also contains answer text. Brace-matching is
+// string-literal aware so a "}" inside a caption doesn't end the object early.
+function findEmbeddedSignal(str) {
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] !== "{") continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < str.length; j++) {
+      const c = str[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+      } else if (c === '"') {
+        inStr = true;
+      } else if (c === "{") {
+        depth++;
+      } else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          const cand = str.slice(i, j + 1);
+          try {
+            const obj = JSON.parse(cand);
+            if (obj && typeof obj === "object" && (
+              "images" in obj || "imageMode" in obj ||
+              "endSession" in obj || "escalation" in obj ||
+              (obj.metadata && typeof obj.metadata === "object")
+            )) {
+              return { before: str.slice(0, i), obj, after: str.slice(j + 1) };
+            }
+          } catch (e) { /* not JSON — fall through and keep scanning from the next "{" */ }
+          break; // this "{" didn't yield a signal object; advance outer scan
+        }
+      }
+    }
+  }
+  return null;
+}
+
 exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   const httpResponse = awslambda.HttpResponseStream.from(responseStream, {
     statusCode: 200,
@@ -79,8 +129,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   let fullAnswer = "";
   let escalation = false;
   let endSession = false;
-  let images = null;      // [{ url, caption? }, ...] from the agent, relayed on `done`
-  let imageMode = null;   // "single" | "stepper" | "stack"
+  let lastImagesKey = null;   // JSON of the last image payload emitted — dedupes exact repeats
 
   try {
     const body = JSON.parse(event.body || "{}");
@@ -118,8 +167,41 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
 
     console.log("AGENTCORE_RESPONSE", agentResponse.response);
 
-    // Process one COMPLETE line (already reassembled across chunk boundaries). We preserve the
-    // token's own whitespace: only a trailing CR and, per SSE, one leading space are removed.
+    // --- emitters -----------------------------------------------------------
+    const emitToken = (t) => {
+      if (t == null || t === "") return;
+      fullAnswer += t;
+      httpResponse.write(JSON.stringify({ type: "token", text: t }) + "\n");
+    };
+    const emitImages = (imgs, mode) => {
+      if (!Array.isArray(imgs) || imgs.length === 0) return;
+      const m = (typeof mode === "string" && mode) ? mode : "single";
+      const key = JSON.stringify({ i: imgs, m });
+      if (key === lastImagesKey) return;          // identical to the previous payload — skip (mid + end repeat)
+      lastImagesKey = key;
+      httpResponse.write(JSON.stringify({ type: "image", images: imgs, imageMode: m }) + "\n");
+    };
+
+    // Consumes a parsed object: emit its token text (if any), capture flags, and emit any images
+    // INLINE at this stream position. Handles top-level and `metadata`-nested fields.
+    const handleObject = (obj) => {
+      const t =
+        obj?.event?.contentBlockDelta?.delta?.text ??
+        obj?.delta?.text ??
+        obj?.text ??
+        null;
+      if (typeof t === "string") emitToken(t);
+
+      const src = [obj, obj && obj.metadata];
+      for (const o of src) {
+        if (!o || typeof o !== "object") continue;
+        if (typeof o.endSession === "boolean") endSession = o.endSession;
+        if (typeof o.escalation === "boolean") escalation = o.escalation;
+        if (Array.isArray(o.images)) emitImages(o.images, o.imageMode);
+      }
+    };
+
+    // Process one COMPLETE line (already reassembled across chunk boundaries).
     const processLine = (rawLine) => {
       const line = rawLine.replace(/\r$/, "");
       if (!line.startsWith("data:")) return;
@@ -128,33 +210,29 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
       if (payload === "") return;                               // empty data line / keep-alive
       if (payload.trim() === "[DONE]") return;
 
-      let tokenText = null;
-      try {
-        const obj = JSON.parse(payload);                        // JSON.parse tolerates surrounding whitespace
-        tokenText =
-          obj?.event?.contentBlockDelta?.delta?.text ??
-          obj?.delta?.text ??
-          obj?.text ??
-          (typeof obj === "string" ? obj : null);
-
-        // The agent (LLM) may signal end-of-session / escalation and attach images via
-        // structured fields — at the top level or under `metadata`. Latest value wins.
-        const src = [obj, obj && obj.metadata];
-        for (const o of src) {
-          if (!o || typeof o !== "object") continue;
-          if (typeof o.endSession === "boolean") endSession = o.endSession;
-          if (typeof o.escalation === "boolean") escalation = o.escalation;
-          if (Array.isArray(o.images)) images = o.images;
-          if (typeof o.imageMode === "string") imageMode = o.imageMode;
-        }
-      } catch {
-        tokenText = payload;                                    // raw text token — whitespace preserved
+      // 1) The clean/standard shape: the whole payload is one JSON value.
+      let obj;
+      let parsed = true;
+      try { obj = JSON.parse(payload); } catch (e) { parsed = false; }
+      if (parsed) {
+        if (obj && typeof obj === "object") { handleObject(obj); return; }
+        if (typeof obj === "string") { emitToken(obj); return; }  // data: "quoted text"
+        // number/boolean/null as a bare token — stringify defensively
+        emitToken(String(payload));
+        return;
       }
 
-      if (tokenText) {
-        fullAnswer += tokenText;
-        httpResponse.write(JSON.stringify({ type: "token", text: tokenText }) + "\n");
+      // 2) Not clean JSON — it may be raw text, OR answer text with an image/flags object glued on.
+      const found = findEmbeddedSignal(payload);
+      if (found) {
+        if (found.before && found.before.trim() !== "") emitToken(found.before);
+        handleObject(found.obj);                               // emits the inline image event here
+        if (found.after && found.after.trim() !== "") emitToken(found.after);
+        return;
       }
+
+      // 3) Pure raw text token — whitespace preserved.
+      emitToken(payload);
     };
 
     for await (const chunk of agentResponse.response) {
@@ -168,11 +246,11 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
       }
     }
     // Flush the decoder and process the final line, which may arrive WITHOUT a trailing "\n"
-    // (otherwise the last event — e.g. the images/endSession signal — would be lost).
+    // (otherwise the last event — e.g. a trailing images/endSession signal — would be lost).
     buffer += decoder.decode();
     if (buffer.trim()) processLine(buffer);
 
-    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, images, imageMode }) + "\n");
+    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession }) + "\n");
 
     await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession });
   } catch (e) {
