@@ -6,12 +6,47 @@ function timeStr(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// Splits a plain string on "\n" into text + <br> nodes (React escapes the text).
+// Turns bare URLs in a plain string into clickable links that open in a new tab. Everything
+// stays React-escaped (the URL is set via the href prop and the visible text is a child string —
+// no dangerouslySetInnerHTML), so this is safe against injection. `target="_blank"` +
+// `rel="noopener noreferrer"` opens a new tab without giving the opened page access to ours.
+const URL_RE = /((?:https?:\/\/|www\.)[^\s]+)/gi;
+function linkify(str, keyPrefix) {
+  const s = String(str);
+  const out = [];
+  let last = 0, m, i = 0;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(s)) !== null) {
+    let url = m[0];
+    const start = m.index;
+    // Don't swallow trailing punctuation/brackets that follow the URL in a sentence.
+    const trail = url.match(/[.,;:!?)\]}'"]+$/);
+    let tail = "";
+    if (trail) { tail = trail[0]; url = url.slice(0, -tail.length); }
+    if (!url) { // the match was pure punctuation — skip, emit as text
+      out.push(s.slice(last, start + m[0].length));
+      last = start + m[0].length; continue;
+    }
+    if (start > last) out.push(s.slice(last, start));
+    const href = /^www\./i.test(url) ? "https://" + url : url;
+    out.push(
+      <a key={keyPrefix + "-l" + i} className="chat-link" href={href} target="_blank" rel="noopener noreferrer">{url}</a>
+    );
+    if (tail) out.push(tail);
+    last = start + m[0].length;
+    i++;
+  }
+  if (last < s.length) out.push(s.slice(last));
+  return out.length ? out : [s];
+}
+
+// Splits a plain string on "\n" into text + <br> nodes, linkifying URLs on each line
+// (React escapes all text; only real URLs become <a> elements).
 function withBreaks(str, keyPrefix) {
   const lines = String(str).split("\n");
   return lines.map((line, i) => (
     <span key={keyPrefix + "-" + i}>
-      {line}
+      {linkify(line, keyPrefix + "-" + i)}
       {i < lines.length - 1 && <br />}
     </span>
   ));
