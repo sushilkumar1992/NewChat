@@ -58,12 +58,15 @@ export function useChat() {
     // addBot(config.followUp);
   }, [config.followUp, addBot]);
 
-  // Ends the session UI: appends the closing message and opens the feedback panel.
-  // Reached two ways — the manual "End chat" button, and the backend LLM signalling
-  // endSession on a streamed answer (see streamAsk onDone). Idempotent via endedRef.
-  const beginEnd = useCallback(() => {
+  // Ends the session UI: opens the feedback panel, and (unless skipped) appends the frontend
+  // closing message. Reached two ways:
+  //   - the manual "End chat" button -> no LLM closing exists, so we DO show config.closing.
+  //   - the backend LLM signalling endSession on a streamed answer -> the LLM already streamed
+  //     its own closing text, so we pass { skipClosing: true } and show THAT instead of config.closing.
+  // Idempotent via endedRef.
+  const beginEnd = useCallback((opts) => {
     if (endedRef.current) return;
-    addBot(config.closing);
+    if (!(opts && opts.skipClosing)) addBot(config.closing);
     endedRef.current = true;
     setEnded(true);
     setFeedbackOpen(true);
@@ -79,42 +82,49 @@ export function useChat() {
       // `text` still holds the full concatenated answer text (used for feedback + the record).
       setMessages((prev) => [...prev, { id, role: "bot", text: "", blocks: [], ts: Date.now(), loading: true, streaming: true, answer: true, query: text }]);
 
+      // Track this turn's content in the closure (NOT React state) so onDone can decide
+      // synchronously whether the LLM streamed a closing — reading state here would race the
+      // pending token updates, since the last token and the `done` line can arrive together.
+      let accText = "";
+      let accHasImages = false;
+
       streamMessage(
         { sessionId: sessionRef.current, text, messageId: id },
         {
-          onToken: (tok) => patch(id, (m) => {
+          onToken: (tok) => { accText += tok; patch(id, (m) => {
             // Append to the trailing text block, or open a new one after an image block.
             const blocks = m.blocks ? m.blocks.slice() : [];
             const last = blocks[blocks.length - 1];
             if (last && last.type === "text") blocks[blocks.length - 1] = { ...last, text: last.text + tok };
             else blocks.push({ type: "text", text: tok });
             return { loading: false, text: (m.text || "") + tok, blocks };
-          }),
-          onImage: (evt) => patch(id, (m) => {
+          }); },
+          onImage: (evt) => { if (evt.images && evt.images.length) accHasImages = true; patch(id, (m) => {
             // Drop an image block at the current stream position (between text, or at the end).
             const blocks = m.blocks ? m.blocks.slice() : [];
             blocks.push({ type: "images", images: evt.images || [], imageMode: evt.imageMode || "single" });
             return { loading: false, blocks };
-          }),
+          }); },
           onDone: (evt) => {
             patch(id, { loading: false, streaming: false, escalation: !!evt.escalation, ts: Date.now() });
             setBusy(false);
             busyRef.current = false;
             // The backend LLM decides whether this turn ends the session.
             if (evt.endSession) {
-              // Closing turn: this bubble is not a rateable Q&A answer. Drop it if it
-              // carried no text and no images, otherwise keep it but unflag it as an answer.
+              // Closing turn: SHOW the LLM's own streamed closing text (its "Thank you for using…"
+              // response) — do NOT append the frontend config.closing. This bubble is the closing,
+              // not a rateable Q&A answer, so unflag it (no thumbs, excluded from message counts).
+              const llmClosed = accText.trim() !== "" || accHasImages;
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last && last.id === id) {
-                  const hasText = String(last.text || "").trim() !== "";
-                  const hasImages = (last.blocks || []).some((b) => b.type === "images" && b.images && b.images.length);
-                  if (!hasText && !hasImages) return prev.slice(0, -1);
+                  if (!llmClosed) return prev.slice(0, -1); // LLM sent nothing -> drop the empty bubble
                   return prev.map((m) => (m.id === id ? { ...m, answer: false } : m));
                 }
                 return prev;
               });
-              beginEnd();
+              // Keep the LLM closing; only fall back to config.closing if the LLM streamed nothing.
+              beginEnd({ skipClosing: llmClosed });
             } else {
               askAnythingElse();
             }
