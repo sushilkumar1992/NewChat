@@ -145,9 +145,22 @@ button, textarea { font-family: var(--font); }
 }
 .msg-fb__btn:hover:not(:disabled) { border-color: var(--brand); opacity: 1; }
 .msg-fb__btn:active:not(:disabled) { transform: scale(.92); }
-.msg-fb__btn.active { background: var(--brand-050); border-color: var(--brand); opacity: 1; }
+/* selected vote — semantic colours from the palette: up = green (--ok), down = red (--err) */
+.msg-fb__btn.active { opacity: 1; transform: translateY(-1px); }
+.msg-fb__btn--up.active {
+  background: rgba(22, 163, 74, .15);   /* --ok #16a34a tint */
+  border-color: var(--ok);
+  box-shadow: 0 2px 7px rgba(22, 163, 74, .30);
+}
+.msg-fb__btn--down.active {
+  background: rgba(220, 38, 38, .13);   /* --err #dc2626 tint */
+  border-color: var(--err);
+  box-shadow: 0 2px 7px rgba(220, 38, 38, .28);
+}
+/* after a vote, dim the thumb that wasn't chosen so the choice stands out */
+.msg-fb--voted .msg-fb__btn:not(.active) { opacity: .35; }
+.msg-fb--voted .msg-fb__btn:not(.active):hover { opacity: 1; }   /* still changeable */
 .msg-fb__btn:disabled { cursor: default; }
-.msg-fb--done .msg-fb__btn:not(.active) { opacity: .4; }
 
 /* typing + streaming caret */
 .typing { display: inline-flex; gap: 4px; align-items: center; padding: 13px 14px; }

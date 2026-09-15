@@ -90,11 +90,13 @@ function TextBody({ text, streaming }) {
 // thumb stays highlighted; each click re-sends and the backend updates the same record.
 function MsgFeedback({ m, onRate }) {
   const vote = (rating) => onRate && onRate(m.id, rating, { query: m.query, answer: m.text });
+  // Once a vote exists, `msg-fb--voted` lets CSS dim the thumb that wasn't chosen; the chosen
+  // one gets `.active` (green for up, red for down — see styles.css).
   return (
-    <div className="msg-fb">
+    <div className={"msg-fb" + (m.rating ? " msg-fb--voted" : "")}>
       <button
         type="button"
-        className={"msg-fb__btn" + (m.rating === "up" ? " active" : "")}
+        className={"msg-fb__btn msg-fb__btn--up" + (m.rating === "up" ? " active" : "")}
         title="Helpful"
         aria-label="Helpful"
         aria-pressed={m.rating === "up"}
@@ -104,7 +106,7 @@ function MsgFeedback({ m, onRate }) {
       </button>
       <button
         type="button"
-        className={"msg-fb__btn" + (m.rating === "down" ? " active" : "")}
+        className={"msg-fb__btn msg-fb__btn--down" + (m.rating === "down" ? " active" : "")}
         title="Not helpful"
         aria-label="Not helpful"
         aria-pressed={m.rating === "down"}
