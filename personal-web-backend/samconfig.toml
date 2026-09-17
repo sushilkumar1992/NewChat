@@ -13,7 +13,11 @@ region = "us-east-2"
 capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
 confirm_changeset = true
-# AgentRuntimeArn has no default — pass it at deploy time, e.g.:
-#   sam deploy --parameter-overrides AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<acct>:runtime/<id>
-# The table name override is optional (default matches template.yaml):
-#   --parameter-overrides AgentRuntimeArn=... TableName=RBPOCTable
+# Required deploy parameters (no defaults) — pass both at deploy time:
+#   AgentRuntimeArn : the Bedrock AgentCore runtime ARN the streaming Lambda invokes
+#   FrontendOrigin  : the exact browser origin of the frontend (locks CORS), e.g. https://app.example.com
+# Example:
+#   sam deploy --parameter-overrides \
+#       AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<acct>:runtime/<id> \
+#       FrontendOrigin=https://app.example.com
+# TableName is optional (default RBPOCTable):  ... TableName=RBPOCTable

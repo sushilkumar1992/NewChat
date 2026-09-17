@@ -15,10 +15,12 @@
 // item can hit the 400 KB limit, and one Query on the PK returns the whole session:
 //   PK = "CONFIG"               SK = <configKey>        -> config singleton
 //   PK = "SUGGESTIONS"          SK = "ALL"              -> ALL suggestions in one item: { items: [{id,question,count}] }
-//   PK = "SESSION#<sessionId>"  SK = "META"             -> session summary/feedback (tiny item)
+//   PK = "SESSION#<sessionId>"  SK = "META"             -> session summary/feedback (tiny item);
+//        includes inputTokenTotal / outputTokenTotal = sum of every turn's token usage (client-sent).
 //   PK = "SESSION#<sessionId>"  SK = "MSG#<messageId>"  -> ONE Q&A turn: question, answer, ts,
-//        escalation, endSession, feedbackRating, feedbackAt (Q&A written by streaming-lambda,
-//        thumbs written here). Every writer uses UpdateItem, so the two never clobber each other.
+//        escalation, endSession, inputTokens, outputTokens, feedbackRating, feedbackAt (Q&A +
+//        per-turn tokens written by streaming-lambda, thumbs written here). Every writer uses
+//        UpdateItem, so the two never clobber each other.
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const {
@@ -100,6 +102,7 @@ async function postSessionFeedback(sessionId, body) {
       "SET #t = :type, sessionId = :sid, rating = :rating, reasons = :reasons, #o = :other, " +
       "startedAt = :startedAt, endedAt = :endedAt, durationMs = :durationMs, " +
       "messageCount = :messageCount, questionCount = :questionCount, " +
+      "inputTokenTotal = :inputTokenTotal, outputTokenTotal = :outputTokenTotal, " +
       "createdAt = if_not_exists(createdAt, :now), updatedAt = :now",
     ExpressionAttributeNames: { "#t": "type", "#o": "other" },
     ExpressionAttributeValues: {
@@ -113,6 +116,10 @@ async function postSessionFeedback(sessionId, body) {
       ":durationMs": body.durationMs ?? null,
       ":messageCount": body.messageCount ?? null,
       ":questionCount": body.questionCount ?? null,
+      // Session totals = sum of every turn's token usage (computed by the client, which owns the
+      // session record). Stored verbatim; the backend does not recompute them.
+      ":inputTokenTotal": Number.isFinite(Number(body.inputTokenTotal)) ? Number(body.inputTokenTotal) : null,
+      ":outputTokenTotal": Number.isFinite(Number(body.outputTokenTotal)) ? Number(body.outputTokenTotal) : null,
       ":now": now
     }
   }));

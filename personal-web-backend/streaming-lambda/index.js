@@ -9,8 +9,13 @@
 //   {"type":"start"}
 //   {"type":"token","text":"..."}                           (many)
 //   {"type":"image","images":[{url,caption?}],"imageMode":"single|stepper|stack"}  (0..n, IN ORDER)
-//   {"type":"done","escalation":false,"endSession":false}
+//   {"type":"done","escalation":false,"endSession":false,"inputTokens":123,"outputTokens":456}
 //   {"type":"error","message":"..."}
+//
+// Token usage: the agent may report `input_token` / `output_token` for the turn (same way it
+// sends endSession — top level, or under `metadata` / `usage`). We store them on this turn's
+// item (inputTokens / outputTokens) and forward them on `done`; the frontend sums them across
+// the session and saves the totals with the session feedback.
 //
 // Images are streamed INLINE: the moment a line yields an image payload we emit an `image`
 // event at that position in the stream, so the UI renders it exactly where it arrived —
@@ -47,27 +52,44 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
 // Persists a Q&A turn as its own item (SK = MSG#<messageId>). A single UpdateItem that sets only
 // the Q&A fields, so it merges with (never clobbers) any feedbackRating the api-lambda wrote for
 // the same message. Best-effort — a failure must never break the stream.
-async function logMessage({ sessionId, messageId, question, answer, escalation, endSession }) {
+async function logMessage({ sessionId, messageId, question, answer, escalation, endSession, inputTokens, outputTokens }) {
   const now = new Date().toISOString();
   const ts = Date.now();
+  // Base fields always written. Token counts are appended only when the agent reported them for
+  // this turn (a number), so a turn with no usage report doesn't overwrite anything with null.
+  let setExpr =
+    "SET #t = :type, sessionId = :sid, messageId = :mid, question = :q, answer = :a, " +
+    "ts = :ts, escalation = :esc, endSession = :end, " +
+    "createdAt = if_not_exists(createdAt, :now), updatedAt = :now";
+  const vals = {
+    ":type": "MESSAGE", ":sid": sessionId, ":mid": messageId,
+    ":q": question, ":a": answer, ":ts": ts,
+    ":esc": escalation, ":end": endSession, ":now": now
+  };
+  if (typeof inputTokens === "number") { setExpr += ", inputTokens = :it"; vals[":it"] = inputTokens; }
+  if (typeof outputTokens === "number") { setExpr += ", outputTokens = :ot"; vals[":ot"] = outputTokens; }
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
       Key: { PK: `SESSION#${sessionId}`, SK: `MSG#${messageId}` },
-      UpdateExpression:
-        "SET #t = :type, sessionId = :sid, messageId = :mid, question = :q, answer = :a, " +
-        "ts = :ts, escalation = :esc, endSession = :end, " +
-        "createdAt = if_not_exists(createdAt, :now), updatedAt = :now",
+      UpdateExpression: setExpr,
       ExpressionAttributeNames: { "#t": "type" },
-      ExpressionAttributeValues: {
-        ":type": "MESSAGE", ":sid": sessionId, ":mid": messageId,
-        ":q": question, ":a": answer, ":ts": ts,
-        ":esc": escalation, ":end": endSession, ":now": now
-      }
+      ExpressionAttributeValues: vals
     }));
   } catch (e) {
     console.error("Failed to persist message to DynamoDB:", e);
   }
+}
+
+// Reads the first present numeric value among the given keys on an object (tolerates the various
+// names the agent might use). Returns null if none is a finite number.
+function firstNum(o, keys) {
+  for (const k of keys) {
+    if (o[k] == null) continue;
+    const n = Number(o[k]);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 // Scans a string for the FIRST balanced {...} substring that parses as JSON AND looks like an
@@ -129,6 +151,8 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   let fullAnswer = "";
   let escalation = false;
   let endSession = false;
+  let inputTokens = null;     // token usage for THIS turn (from the agent's signal) — forwarded + stored
+  let outputTokens = null;
   let lastImagesKey = null;   // JSON of the last image payload emitted — dedupes exact repeats
 
   try {
@@ -192,12 +216,19 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
         null;
       if (typeof t === "string") emitToken(t);
 
-      const src = [obj, obj && obj.metadata];
+      // Look for signal fields at the top level, under `metadata`, and under a `usage` object
+      // (covers "input_token" sent like endSession, and the Bedrock usage.inputTokens shape).
+      const src = [obj, obj && obj.metadata, obj && obj.usage, obj && obj.metadata && obj.metadata.usage];
       for (const o of src) {
         if (!o || typeof o !== "object") continue;
         if (typeof o.endSession === "boolean") endSession = o.endSession;
         if (typeof o.escalation === "boolean") escalation = o.escalation;
         if (Array.isArray(o.images)) emitImages(o.images, o.imageMode);
+        // Token usage for this turn (latest report wins). Accept snake_case / camelCase / plural.
+        const inT = firstNum(o, ["input_token", "input_tokens", "inputTokens", "inputToken"]);
+        if (inT != null) inputTokens = inT;
+        const outT = firstNum(o, ["output_token", "output_tokens", "outputTokens", "outputToken"]);
+        if (outT != null) outputTokens = outT;
       }
     };
 
@@ -250,9 +281,9 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     buffer += decoder.decode();
     if (buffer.trim()) processLine(buffer);
 
-    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession }) + "\n");
+    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, inputTokens, outputTokens }) + "\n");
 
-    await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession });
+    await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession, inputTokens, outputTokens });
   } catch (e) {
     console.error("StreamLambda error:", e);
     httpResponse.write(JSON.stringify({ type: "error", message: e.message || "Something went wrong." }) + "\n");

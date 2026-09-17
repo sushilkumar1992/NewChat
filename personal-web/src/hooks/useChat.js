@@ -21,6 +21,9 @@ export function useChat() {
   const openedRef = useRef(false);
   const endedAtRef = useRef(null);
   const messagesRef = useRef([]);
+  // Running session totals of the agent's per-turn token usage (from each stream's `done`). Kept
+  // in a ref (not state) so accumulating never triggers a re-render; sent with the session feedback.
+  const tokensRef = useRef({ input: 0, output: 0 });
 
   // Keep a ref to the latest transcript so submitFeedback can read message counts
   // at end-of-session without re-creating the callback on every new message.
@@ -40,6 +43,7 @@ export function useChat() {
     if (openedRef.current) return;
     openedRef.current = true;
     startedAtRef.current = Date.now();
+    tokensRef.current = { input: 0, output: 0 };   // fresh token tally per session
 
     // The sessionId is generated on the client and owned for the entire session
     // (open -> messages -> feedback). It lives only in memory, so a browser refresh
@@ -106,7 +110,13 @@ export function useChat() {
             return { loading: false, blocks };
           }); },
           onDone: (evt) => {
-            patch(id, { loading: false, streaming: false, escalation: !!evt.escalation, ts: Date.now() });
+            // Accumulate this turn's token usage into the session totals, and stamp it on the
+            // message (handy for export/debug). Missing/non-numeric counts add 0.
+            const inTok = Number(evt.inputTokens) || 0;
+            const outTok = Number(evt.outputTokens) || 0;
+            tokensRef.current.input += inTok;
+            tokensRef.current.output += outTok;
+            patch(id, { loading: false, streaming: false, escalation: !!evt.escalation, inputTokens: inTok, outputTokens: outTok, ts: Date.now() });
             setBusy(false);
             busyRef.current = false;
             // The backend LLM decides whether this turn ends the session.
@@ -193,7 +203,10 @@ export function useChat() {
         endedAt: new Date(endedMs).toISOString(),
         durationMs,
         messageCount,
-        questionCount
+        questionCount,
+        // Session token totals = sum of every turn's usage reported by the agent.
+        inputTokenTotal: tokensRef.current.input,
+        outputTokenTotal: tokensRef.current.output
       });
     } catch (e) { /* best-effort — the UI still shows the session summary */ }
 

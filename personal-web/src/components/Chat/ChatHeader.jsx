@@ -1,7 +1,9 @@
 import { useConfig } from "../../context/ConfigContext.jsx";
+import { useAuth } from "../../context/AuthContext.jsx";
 
 export default function ChatHeader({ onEnd, ended }) {
   const config = useConfig();
+  const { logout } = useAuth();
   return (
     <div className="chat__header">
       <img
@@ -25,6 +27,9 @@ export default function ChatHeader({ onEnd, ended }) {
             End chat
           </button>
         )}
+        <button className="end-btn end-btn--signout" title="Sign out" onClick={logout}>
+          Sign out
+        </button>
       </div>
     </div>
   );

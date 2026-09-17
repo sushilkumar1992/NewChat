@@ -314,3 +314,46 @@ button, textarea { font-family: var(--font); }
 @media (max-width: 480px) {
   .popup { top: 12px; bottom: 12px; right: 12px; left: 12px; width: auto; }
 }
+
+/* ============ Auth / login page ============ */
+.auth {
+  min-height: 100vh; display: grid; place-items: center; padding: 24px;
+  background: linear-gradient(135deg, var(--brand-050), #fff);
+}
+.auth--loading { background: var(--surface-2); }
+.auth__spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--brand-100); border-top-color: var(--brand);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.auth__card {
+  width: 100%; max-width: 380px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+  padding: 26px 24px 22px; display: flex; flex-direction: column; gap: 14px;
+}
+.auth__brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.auth__brand img { width: 44px; height: 44px; }
+.auth__title { font-size: 20px; font-weight: 800; color: var(--text); line-height: 1.1; }
+.auth__sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.auth__note { font-size: 13px; color: var(--brand-d); margin: 0; }
+.auth__label { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.auth__input {
+  font-family: var(--font); font-size: 14.5px; padding: 11px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text);
+}
+.auth__input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(232,117,17,.15); }
+.auth__err {
+  font-size: 13px; color: var(--err); background: rgba(220,38,38,.08);
+  border: 1px solid rgba(220,38,38,.25); border-radius: 9px; padding: 9px 11px;
+}
+.auth__btn {
+  margin-top: 4px; border: none; background: var(--brand); color: #fff;
+  border-radius: 11px; padding: 12px 16px; font-size: 14.5px; font-weight: 700; cursor: pointer;
+}
+.auth__btn:hover:not(:disabled) { background: var(--brand-d); }
+.auth__btn:disabled { opacity: .6; cursor: default; }
+.auth__hint { font-size: 11.5px; color: var(--muted); text-align: center; margin-top: 2px; }
+
+/* sign-out button in the chat header (reuses .end-btn look) */
+.end-btn--signout { margin-left: 8px; }

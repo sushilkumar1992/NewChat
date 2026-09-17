@@ -5,6 +5,14 @@ Everything below targets **AWS region `us-east-2`**, **Node.js 22**, and **AWS S
 - **api-lambda** → API Gateway **HTTP API** → `GET /config`, `GET /suggestions`, `POST /sessions/{sessionId}/feedback`, `POST /sessions/{sessionId}/messages/feedback`
 - **streaming-lambda** → Lambda **Function URL** (`RESPONSE_STREAM`) → invokes your Bedrock AgentCore runtime and streams NDJSON tokens
 - **DynamoDB** → all persisted data (created via the console, referenced by SAM)
+- **Cognito** → **User Pool** (login) + **Identity Pool** (temporary AWS credentials)
+
+> **Auth (important):** the streaming Function URL is **PRIVATE** — `AuthType: AWS_IAM`. A plain
+> `curl` gets **403**. Users log in via Cognito; the signed-in frontend gets temporary AWS creds
+> from the Identity Pool and **SigV4-signs** each streaming request. CORS is locked to your
+> frontend origin (no more `*`). The auth-specific setup — creating login users, the frontend
+> Cognito env vars, and how signing works — lives in **`docs/cognito-auth-setup.md`**; this doc
+> covers deployment, DynamoDB and the API endpoints.
 
 ---
 
@@ -93,6 +101,7 @@ sam deploy --guided
 - **Stack Name**: `personal-web-backend`
 - **AWS Region**: `us-east-2`
 - **Parameter AgentRuntimeArn**: paste your `arn:aws:bedrock-agentcore:us-east-2:...` ARN
+- **Parameter FrontendOrigin**: the EXACT origin your frontend runs on (e.g. `http://localhost:5173` for dev, `https://app.example.com` for prod) — locks CORS
 - **Parameter TableName**: press Enter to accept the default `RBPOCTable` (or type your table name)
 - **Confirm changes before deploy**: `Y`
 - **Allow SAM CLI IAM role creation**: `Y` (this creates the execution roles)
@@ -114,7 +123,9 @@ sam deploy \
   --region us-east-2 \
   --capabilities CAPABILITY_IAM \
   --resolve-s3 \
-  --parameter-overrides AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<ACCOUNT_ID>:runtime/<runtime-id>
+  --parameter-overrides \
+    AgentRuntimeArn=arn:aws:bedrock-agentcore:us-east-2:<ACCOUNT_ID>:runtime/<runtime-id> \
+    FrontendOrigin=https://app.example.com
 ```
 
 ---
@@ -133,7 +144,26 @@ aws cloudformation describe-stacks \
 You need:
 
 - **HttpApiBaseUrl** → e.g. `https://abc123.execute-api.us-east-2.amazonaws.com`
-- **StreamFunctionUrl** → e.g. `https://xxxxxxxx.lambda-url.us-east-2.on.aws/`
+- **StreamFunctionUrl** → e.g. `https://xxxxxxxx.lambda-url.us-east-2.on.aws/` (PRIVATE — AWS_IAM)
+- **UserPoolId**, **UserPoolClientId**, **IdentityPoolId**, **AwsRegion** → Cognito, for the frontend `.env`
+
+---
+
+## 4.5 Create a login user (Cognito — admin only)
+
+Public sign-up is disabled, so create each user with the CLI (or the Cognito console). Full details
++ first-login "set new password" behaviour are in **`docs/cognito-auth-setup.md`**; the short version:
+
+```bash
+POOL_ID=$(aws cloudformation describe-stacks --region us-east-2 \
+  --stack-name personal-web-backend \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" --output text)
+
+aws cognito-idp admin-create-user --region us-east-2 \
+  --user-pool-id "$POOL_ID" --username user@example.com \
+  --user-attributes Name=email,Value=user@example.com Name=email_verified,Value=true \
+  --temporary-password 'Temp#1234'
+```
 
 ---
 
@@ -179,21 +209,29 @@ aws dynamodb put-item --region us-east-2 --table-name RBPOCTable --item '{
 
 ## 6. Wire the frontend
 
-Create `personal-web/.env` (from `.env.example`) with the two URLs from step 4:
+Create `personal-web/.env` (from `.env.example`) with the URLs **and** the Cognito ids from step 4:
 
 ```
 VITE_API_BASE_URL=https://abc123.execute-api.us-east-2.amazonaws.com
 VITE_STREAM_URL=https://xxxxxxxx.lambda-url.us-east-2.on.aws/
+VITE_AWS_REGION=us-east-2
+VITE_COGNITO_USER_POOL_ID=us-east-2_xxxxxxxxx
+VITE_COGNITO_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
+VITE_COGNITO_IDENTITY_POOL_ID=us-east-2:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 VITE_ENABLE_MESSAGE_FEEDBACK=yes
 ```
 
-Then **restart** the dev server:
+Then install (the auth libs `aws-amplify` + `aws4fetch` are in `package.json`) and **restart** the dev server:
 
 ```bash
 cd personal-web
-npm install   # first time only
+npm install   # first time only — pulls in aws-amplify + aws4fetch
 npm run dev
 ```
+
+The app now opens on a **login page**; sign in with a Cognito user (§4.5) and the chatbot loads.
+`VITE_STREAM_URL` must be the **frontend origin** you passed as `FrontendOrigin` at deploy, or CORS
+will block the stream — for local dev deploy with `FrontendOrigin=http://localhost:5173`.
 
 ---
 
@@ -230,15 +268,18 @@ curl -s -X POST "$API/sessions/$SID/messages/feedback" \
   -d '{"messageId":"m1","rating":"up","query":"How do I reset my password?","answer":"Open Settings > Security."}' | jq .
 ```
 
-**Streaming (NDJSON; `-N` disables buffering so you see tokens arrive):**
+**Streaming — the Function URL is PRIVATE (`AWS_IAM`).** A plain `curl` is rejected:
 
 ```bash
-curl -N -X POST "$STREAM" \
-  -H "content-type: application/json" \
+curl -N -X POST "$STREAM" -H "content-type: application/json" \
   -d "{\"sessionId\":\"$SID\",\"text\":\"How do I reset my password?\"}"
+# → HTTP 403 (Forbidden) — this is expected; the endpoint is private.
 ```
 
-You should see lines like `{"type":"start"}`, several `{"type":"token","text":"..."}`, then `{"type":"done","escalation":false,"endSession":false}`.
+To exercise streaming, use the **signed-in frontend** (§6), which SigV4-signs the request with
+Cognito Identity-Pool credentials. When it works you'll see `{"type":"start"}`, several
+`{"type":"token","text":"..."}` lines, then `{"type":"done","escalation":false,"endSession":false}`.
+(To sign a request from a terminal you'd need SigV4 with valid creds — the browser does this for you.)
 
 Verify writes landed in DynamoDB (console → Explore items, or):
 
@@ -313,7 +354,8 @@ The streaming-lambda writes each Q&A turn to its own `MSG#<messageId>` item; the
 ## 11. Notes & troubleshooting
 
 - **Region:** everything is us-east-2. If you change it, update `samconfig.toml`, the DynamoDB tables' region, and the agent runtime region, and redeploy.
-- **CORS & preflight:** the frontend sends `content-type: application/json`, which makes the POST calls (and, unless optimized, the GETs) **non-simple**, so the browser fires an `OPTIONS` preflight first. Both front doors answer preflight automatically: the HTTP API via `CorsConfiguration`, the Function URL via `FunctionUrlConfig.Cors` (both allow the `content-type` header and the needed methods). **CORS headers are set in exactly one place per door** — the api-lambda and the streaming-lambda return **no** `Access-Control-*` headers themselves; the gateway / Function URL add them. Setting them in code as well produces duplicate `Access-Control-Allow-Origin` values (`*, *`) that browsers reject. All are `AllowOrigins: *` for development — restrict to your site's origin for production (edit `CorsConfiguration` and `FunctionUrlConfig.Cors` in `template.yaml`, then redeploy). The frontend also omits `content-type` on GETs so `/config` and `/suggestions` skip the preflight entirely.
+- **CORS & preflight:** the frontend sends `content-type: application/json` (and, on the signed stream call, the SigV4 auth headers), which makes the calls **non-simple**, so the browser fires an `OPTIONS` preflight first. Both front doors answer preflight automatically: the HTTP API via `CorsConfiguration`, the Function URL via `FunctionUrlConfig.Cors`. **CORS headers are set in exactly one place per door** — the api-lambda and the streaming-lambda return **no** `Access-Control-*` headers themselves; the gateway / Function URL add them. Setting them in code as well produces duplicate `Access-Control-Allow-Origin` values (`*, *`) that browsers reject. **`AllowOrigins` is locked to the `FrontendOrigin` parameter** (no more `*`); the streaming door's `AllowHeaders` also lists the SigV4 headers (`authorization`, `x-amz-date`, `x-amz-security-token`, `x-amz-content-sha256`) so the signed preflight passes. Change the origin by redeploying with a new `FrontendOrigin`. The frontend also omits `content-type` on GETs so `/config` and `/suggestions` skip the preflight entirely.
+- **Auth:** the streaming Function URL is **`AuthType: AWS_IAM`** (private). Only a caller with valid AWS creds and `lambda:InvokeFunctionUrl` can invoke it; the frontend gets those creds from the Cognito **Identity Pool** authenticated role (which SAM grants invoke-only permission) after a User Pool login, and SigV4-signs each request. Unsigned calls get 403. The HTTP API (`/config`, `/suggestions`, feedback) is **not** yet behind Cognito — CORS-locked but unauthenticated; add a JWT authorizer if you need it. See `docs/cognito-auth-setup.md`.
 - **Streaming needs a Function URL**, not API Gateway — API Gateway does not support Lambda response streaming. That's why the two Lambdas use different front doors.
 - **`awslambda` is undefined locally:** that global only exists in the Lambda Node runtime; the streaming code runs on AWS, not locally.
 - **`AGENT_RUNTIME_ARN is not configured`** in the stream response → the parameter wasn't passed; redeploy with `--parameter-overrides AgentRuntimeArn=...`.
@@ -335,14 +377,16 @@ If you deploy with SAM (§3), **skip this** — it's already done. This appendix
   - `GET /suggestions`
   - `POST /sessions/{sessionId}/feedback`
   - `POST /sessions/{sessionId}/messages/feedback`
-- **CORS**: AllowOrigins `*`, AllowMethods `GET,POST,OPTIONS`, AllowHeaders `content-type` (API Gateway answers `OPTIONS` preflight itself).
+- **CORS**: AllowOrigins = the `FrontendOrigin` parameter, AllowMethods `GET,POST,OPTIONS`, AllowHeaders `content-type` (API Gateway answers `OPTIONS` preflight itself).
 - **Stage** `$default` with **auto-deploy** — served at the API root with **no stage path**, so the base URL is exactly `https://<api-id>.execute-api.us-east-2.amazonaws.com`.
 - Lambda invoke permission for API Gateway (added automatically).
 
-**Lambda Function URL** (front door for **streaming-lambda**):
-- **AuthType** `NONE`, **InvokeMode** `RESPONSE_STREAM` (streaming is only possible this way — not via API Gateway).
-- **CORS**: AllowOrigins `*`, AllowMethods `POST`, AllowHeaders `content-type`.
-- Public invoke permission (`lambda:InvokeFunctionUrl`) added automatically.
+**Lambda Function URL** (front door for **streaming-lambda**) — **PRIVATE**:
+- **AuthType** `AWS_IAM`, **InvokeMode** `RESPONSE_STREAM` (streaming is only possible this way — not via API Gateway).
+- **CORS**: AllowOrigins = the `FrontendOrigin` parameter, AllowMethods `POST`, AllowHeaders `content-type` **plus the SigV4 headers** `authorization, x-amz-date, x-amz-security-token, x-amz-content-sha256`.
+- **No public invoke permission.** Instead SAM grants the Cognito Identity-Pool **authenticated role** `lambda:InvokeFunctionUrl` on this function, so only signed-in users can call it.
+
+**Cognito** (login + private-invoke credentials): SAM also creates a **User Pool**, a public **User Pool Client** (SRP flow), an **Identity Pool** federating the pool, the **authenticated IAM role** (invoke-stream-only), and the **role attachment**. See `docs/cognito-auth-setup.md`.
 
 **Verify after deploy:**
 ```bash
@@ -390,7 +434,7 @@ FN=<ApiFunctionPhysicalName>
 # 1) Create the HTTP API with CORS
 API_ID=$(aws apigatewayv2 create-api --region us-east-2 \
   --name personal-web-api --protocol-type HTTP \
-  --cors-configuration AllowOrigins="*",AllowMethods="GET,POST,OPTIONS",AllowHeaders="content-type" \
+  --cors-configuration AllowOrigins="https://app.example.com",AllowMethods="GET,POST,OPTIONS",AllowHeaders="content-type" \
   --query ApiId --output text)
 
 # 2) Lambda proxy integration (payload v2.0)
@@ -424,13 +468,16 @@ echo "Base URL: https://${API_ID}.execute-api.us-east-2.amazonaws.com"
 ### 12.4 Manual — streaming Lambda Function URL (console)
 
 1. **Lambda** console → your streaming function → **Configuration** tab → **Function URL** → **Create function URL**.
-2. **Auth type**: **NONE**.
+2. **Auth type**: **AWS_IAM** (private — only IAM-authenticated callers; unsigned requests get 403).
 3. **Invoke mode**: **RESPONSE_STREAM** (this is what enables token streaming — the default `BUFFERED` will not stream).
 4. **Configure cross-origin resource sharing (CORS)**: enable, then
-   - Allow origin: `*`
+   - Allow origin: your frontend origin (e.g. `https://app.example.com`) — not `*`
    - Allow methods: `POST`
-   - Allow headers: `content-type`
+   - Allow headers: `content-type, authorization, x-amz-date, x-amz-security-token, x-amz-content-sha256`
 5. **Save**. Copy the **Function URL** (`https://<id>.lambda-url.us-east-2.on.aws/`) → this is `VITE_STREAM_URL`.
+   Because it's `AWS_IAM`, callers must SigV4-sign. Set up Cognito (User Pool + Identity Pool + an
+   authenticated role granted `lambda:InvokeFunctionUrl`) so the frontend can sign — see
+   `docs/cognito-auth-setup.md`. (SAM builds all of this for you; these manual steps are the fallback.)
 6. Also set the function's **environment variables** (Configuration → Environment variables): `AGENT_RUNTIME_ARN`, `TABLE_NAME`, and confirm its **execution role** allows `bedrock-agentcore:InvokeAgentRuntime` and DynamoDB writes to `RBPOCTable`.
 
 ### 12.5 Manual — streaming Lambda Function URL (CLI)
@@ -440,17 +487,13 @@ FN=<StreamFunctionPhysicalName>
 
 aws lambda create-function-url-config --region us-east-2 \
   --function-name "$FN" \
-  --auth-type NONE \
+  --auth-type AWS_IAM \
   --invoke-mode RESPONSE_STREAM \
-  --cors '{"AllowOrigins":["*"],"AllowMethods":["POST"],"AllowHeaders":["content-type"]}'
+  --cors '{"AllowOrigins":["https://app.example.com"],"AllowMethods":["POST"],"AllowHeaders":["content-type","authorization","x-amz-date","x-amz-security-token","x-amz-content-sha256"]}'
 
-# Public invoke permission for the URL
-aws lambda add-permission --region us-east-2 \
-  --function-name "$FN" \
-  --statement-id FunctionURLAllowPublicAccess \
-  --action lambda:InvokeFunctionUrl \
-  --principal "*" \
-  --function-url-auth-type NONE
+# NO public invoke permission. With AWS_IAM, the only caller is the Cognito Identity-Pool
+# authenticated role, whose identity policy grants lambda:InvokeFunctionUrl on this function
+# (created by SAM / template.yaml). Do NOT add a "*" principal permission.
 
 # Read back the URL
 aws lambda get-function-url-config --region us-east-2 --function-name "$FN" \
@@ -503,15 +546,20 @@ aws dynamodb query --region us-east-2 --table-name RBPOCTable \
 
 ### Streaming endpoint (the streaming URL)
 
-`-N` disables curl's buffering so you see tokens as they arrive:
+The Function URL is **private (`AWS_IAM`)**, so an unsigned `curl` returns **403** before the handler
+runs:
 
 ```bash
-curl -N -X POST "$STREAM" \
-  -H "content-type: application/json" \
+curl -N -X POST "$STREAM" -H "content-type: application/json" \
   -d "{\"sessionId\":\"$SID\",\"text\":\"How do I reset my password?\"}"
+# → HTTP 403 (Forbidden). Expected — the endpoint is private.
 ```
 
-Expect `{"type":"start"}`, a series of `{"type":"token","text":"..."}` lines, then `{"type":"done","escalation":false,"endSession":false}`. Validation works even **without** the agent — send `"text":""` and you get `{"type":"error","message":"sessionId and text are required"}`. A real answer needs a valid `AGENT_RUNTIME_ARN` with Bedrock access (an `AccessDenied` on `InvokeAgentRuntime` means the ARN or region is wrong).
+Exercise streaming through the **signed-in frontend** (§6), which SigV4-signs with Cognito
+Identity-Pool creds. When it works you'll see `{"type":"start"}`, a series of
+`{"type":"token","text":"..."}` lines, then `{"type":"done","escalation":false,"endSession":false}`.
+A real answer needs a valid `AGENT_RUNTIME_ARN` with Bedrock access (an `AccessDenied` on
+`InvokeAgentRuntime` means the ARN or region is wrong).
 
 ### Windows note
 
