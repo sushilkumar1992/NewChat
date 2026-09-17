@@ -1,0 +1,86 @@
+/* ---- Ritchie Bros. login layout ---- */
+.rb-auth {
+  min-height: 100vh; display: flex; flex-direction: column;
+  background: var(--surface-2);
+}
+.rb-auth__header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: center; align-items: center; padding: 18px 24px;
+}
+.rb-logo { height: 30px; width: auto; display: inline-flex; align-items: center; }
+.rb-logo--text { gap: 8px; font-weight: 800; letter-spacing: .01em; }
+.rb-logo__mark {
+  color: var(--brand); font-size: 26px; line-height: 1; font-weight: 900;
+}
+.rb-logo__name { color: #111; font-size: 20px; line-height: 1; letter-spacing: .02em; }
+
+.rb-auth__main { flex: 1; display: grid; place-items: center; padding: 40px 24px; }
+
+.rb-card {
+  width: 100%; max-width: 460px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+  padding: 40px 44px 44px; display: flex; flex-direction: column;
+}
+.rb-card__title {
+  margin: 0; text-align: center; font-size: 34px; font-weight: 700;
+  color: #2b2b2b; line-height: 1.15;
+}
+.rb-card__sub {
+  margin: 8px 0 28px; text-align: center; font-size: 15px; color: var(--muted);
+}
+
+/* Outlined field with floating label */
+.rb-field { position: relative; margin-bottom: 22px; }
+.rb-field__input {
+  width: 100%; box-sizing: border-box; font-family: var(--font); font-size: 15px;
+  padding: 15px 14px; border: 1px solid #c4c4c8; border-radius: 4px;
+  background: var(--surface); color: var(--text); outline: none;
+}
+.rb-field--pw .rb-field__input { padding-right: 46px; }
+.rb-field__input:focus { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+.rb-field__label {
+  position: absolute; left: 11px; top: 15px; padding: 0 4px;
+  font-size: 15px; color: var(--muted); background: var(--surface);
+  pointer-events: none; transition: all .15s ease;
+}
+.rb-field__input:focus + .rb-field__label,
+.rb-field__input:not(:placeholder-shown) + .rb-field__label {
+  top: -8px; font-size: 12px; color: var(--muted);
+}
+.rb-field__input:focus + .rb-field__label { color: var(--brand); }
+.rb-field__eye {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border: none; background: none; padding: 0;
+  color: var(--muted); cursor: pointer;
+}
+.rb-field__eye:hover { color: var(--text); }
+
+.rb-card__err {
+  font-size: 13.5px; color: var(--err); background: rgba(220,38,38,.08);
+  border: 1px solid rgba(220,38,38,.25); border-radius: 6px;
+  padding: 10px 12px; margin: -4px 0 18px;
+}
+
+.rb-btn {
+  border: none; border-radius: 999px; padding: 14px 18px;
+  font-size: 15px; font-weight: 600; font-family: var(--font);
+  background: #d9d9dd; color: #8a8a8f; cursor: not-allowed; transition: background .15s ease;
+}
+.rb-btn:not(:disabled) { background: var(--brand); color: #fff; cursor: pointer; }
+.rb-btn:not(:disabled):hover { background: var(--brand-d); }
+
+.rb-auth__footer {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 18px 24px; font-size: 13px; color: var(--muted);
+}
+.rb-auth__legal { display: inline-flex; align-items: center; gap: 8px; }
+.rb-auth__legal a { color: var(--muted); text-decoration: underline; }
+.rb-auth__legal a:hover { color: var(--text); }
+.rb-auth__sep { color: #c4c4c8; }
+
+@media (max-width: 520px) {
+  .rb-card { padding: 32px 22px 34px; }
+  .rb-card__title { font-size: 28px; }
+  .rb-auth__footer { justify-content: center; text-align: center; }
+}

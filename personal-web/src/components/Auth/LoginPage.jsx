@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useAuth } from "../../context/AuthContext.jsx";
 
-// Custom in-app login page. Admin-created Cognito users arrive in FORCE_CHANGE_PASSWORD state,
-// so the first sign-in returns a "new password required" challenge — this page handles that
-// second step inline (no Cognito Hosted UI / redirect).
+// In-app login page (Ritchie Bros. styling). Admin-created Cognito users arrive in
+// FORCE_CHANGE_PASSWORD state, so the first sign-in returns a "new password required"
+// challenge — this page handles that second step inline (no Cognito Hosted UI / redirect).
 export default function LoginPage() {
   const { login, completeNewPassword, refresh } = useAuth();
   const [phase, setPhase] = useState("login"); // "login" | "newPassword"
@@ -11,6 +11,8 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [showNewPw, setShowNewPw] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -49,51 +51,160 @@ export default function LoginPage() {
     }
   }
 
+  const loginReady = email.trim() !== "" && password !== "";
+  const newPwReady = newPassword !== "" && confirmPw !== "";
+  const canSubmit = phase === "login" ? loginReady : newPwReady;
+
   return (
-    <div className="auth">
-      <form className="auth__card" onSubmit={phase === "login" ? submitLogin : submitNewPassword}>
-        <div className="auth__brand">
-          <img src="/assets/personal-icon.svg" alt="" onError={(e) => (e.target.style.display = "none")} />
-          <div>
-            <div className="auth__title">Personal</div>
-            <div className="auth__sub">Sign in to your assistant</div>
-          </div>
-        </div>
+    <div className="rb-auth">
+      <header className="rb-auth__header">
+        <RbLogo />
+      </header>
 
-        {phase === "login" ? (
-          <>
-            <label className="auth__label">Email
-              <input className="auth__input" type="email" autoComplete="username" required
-                     value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-            </label>
-            <label className="auth__label">Password
-              <input className="auth__input" type="password" autoComplete="current-password" required
-                     value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password" />
-            </label>
-          </>
-        ) : (
-          <>
-            <p className="auth__note">First sign-in — please set a new password.</p>
-            <label className="auth__label">New password
-              <input className="auth__input" type="password" autoComplete="new-password" required
-                     value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 8 characters" />
-            </label>
-            <label className="auth__label">Confirm new password
-              <input className="auth__input" type="password" autoComplete="new-password" required
-                     value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Re-enter new password" />
-            </label>
-          </>
-        )}
+      <main className="rb-auth__main">
+        <form
+          className="rb-card"
+          onSubmit={phase === "login" ? submitLogin : submitNewPassword}
+        >
+          <h1 className="rb-card__title">Welcome</h1>
+          <p className="rb-card__sub">
+            {phase === "login"
+              ? "Sign in to your Ritchie Bros. account"
+              : "Set a new password to finish signing in"}
+          </p>
 
-        {err && <div className="auth__err">{err}</div>}
+          {phase === "login" ? (
+            <>
+              <Field
+                id="rb-email"
+                label="Email address"
+                type="email"
+                autoComplete="username"
+                value={email}
+                onChange={setEmail}
+              />
+              <Field
+                id="rb-password"
+                label="Password"
+                type={showPw ? "text" : "password"}
+                autoComplete="current-password"
+                value={password}
+                onChange={setPassword}
+                toggle={{ shown: showPw, onToggle: () => setShowPw((s) => !s) }}
+              />
+            </>
+          ) : (
+            <>
+              <Field
+                id="rb-new-password"
+                label="New password"
+                type={showNewPw ? "text" : "password"}
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={setNewPassword}
+                toggle={{ shown: showNewPw, onToggle: () => setShowNewPw((s) => !s) }}
+              />
+              <Field
+                id="rb-confirm-password"
+                label="Confirm new password"
+                type={showNewPw ? "text" : "password"}
+                autoComplete="new-password"
+                value={confirmPw}
+                onChange={setConfirmPw}
+              />
+            </>
+          )}
 
-        <button className="auth__btn" type="submit" disabled={busy}>
-          {busy ? "Please wait…" : phase === "login" ? "Sign in" : "Set password & continue"}
-        </button>
+          {err && <div className="rb-card__err">{err}</div>}
 
-        <div className="auth__hint">Accounts are created by your administrator.</div>
-      </form>
+          <button className="rb-btn" type="submit" disabled={busy || !canSubmit}>
+            {busy ? "Please wait…" : phase === "login" ? "Sign in" : "Set password & continue"}
+          </button>
+        </form>
+      </main>
+
+      <footer className="rb-auth__footer">
+        <span>© Ritchie Bros. Auctioneers. All rights reserved.</span>
+        <span className="rb-auth__legal">
+          <a href="#" onClick={(e) => e.preventDefault()}>General User Terms</a>
+          <span className="rb-auth__sep">|</span>
+          <a href="#" onClick={(e) => e.preventDefault()}>User Privacy Notice</a>
+        </span>
+      </footer>
     </div>
+  );
+}
+
+// Outlined field with a floating label + optional password eye toggle.
+function Field({ id, label, type, value, onChange, autoComplete, toggle }) {
+  return (
+    <div className={"rb-field" + (toggle ? " rb-field--pw" : "")}>
+      <input
+        id={id}
+        className="rb-field__input"
+        type={type}
+        autoComplete={autoComplete}
+        required
+        placeholder=" "
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <label className="rb-field__label" htmlFor={id}>{label}</label>
+      {toggle && (
+        <button
+          type="button"
+          className="rb-field__eye"
+          onClick={toggle.onToggle}
+          aria-label={toggle.shown ? "Hide password" : "Show password"}
+          tabIndex={-1}
+        >
+          {toggle.shown ? <EyeOff /> : <Eye />}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Brand wordmark: uses the official SVG if present at /assets/ritchie-bros-logo.svg,
+// otherwise falls back to a text wordmark so the page never renders logo-less.
+function RbLogo() {
+  const [imgOk, setImgOk] = useState(true);
+  if (imgOk) {
+    return (
+      <img
+        className="rb-logo"
+        src="/assets/ritchie-bros-logo.svg"
+        alt="Ritchie Bros."
+        onError={() => setImgOk(false)}
+      />
+    );
+  }
+  return (
+    <span className="rb-logo rb-logo--text">
+      <span className="rb-logo__mark">rb</span>
+      <span className="rb-logo__name">RITCHIE BROS.</span>
+    </span>
+  );
+}
+
+function Eye() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOff() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.16 3.19M6.6 6.6C3.9 8.3 2 12 2 12s3.5 7 10 7a9.3 9.3 0 0 0 5.4-1.6" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <path d="m2 2 20 20" />
+    </svg>
   );
 }
 
