@@ -52,7 +52,7 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
 // Persists a Q&A turn as its own item (SK = MSG#<messageId>). A single UpdateItem that sets only
 // the Q&A fields, so it merges with (never clobbers) any feedbackRating the api-lambda wrote for
 // the same message. Best-effort — a failure must never break the stream.
-async function logMessage({ sessionId, messageId, question, answer, escalation, endSession, inputTokens, outputTokens }) {
+async function logMessage({ sessionId, messageId, question, answer, escalation, endSession, inputTokens, outputTokens, firstChunkMs }) {
   const now = new Date().toISOString();
   const ts = Date.now();
   // Base fields always written. Token counts are appended only when the agent reported them for
@@ -68,6 +68,8 @@ async function logMessage({ sessionId, messageId, question, answer, escalation, 
   };
   if (typeof inputTokens === "number") { setExpr += ", inputTokens = :it"; vals[":it"] = inputTokens; }
   if (typeof outputTokens === "number") { setExpr += ", outputTokens = :ot"; vals[":ot"] = outputTokens; }
+  // Latency (ms) from submitting the prompt to AgentCore until its first response chunk arrived.
+  if (typeof firstChunkMs === "number") { setExpr += ", firstChunkMs = :ttfc"; vals[":ttfc"] = firstChunkMs; }
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
@@ -154,6 +156,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   let inputTokens = null;     // token usage for THIS turn (from the agent's signal) — forwarded + stored
   let outputTokens = null;
   let lastImagesKey = null;   // JSON of the last image payload emitted — dedupes exact repeats
+  let firstChunkMs = null;    // ms from submitting the prompt to AgentCore until its first chunk arrived
 
   try {
     const body = JSON.parse(event.body || "{}");
@@ -182,6 +185,7 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
       payload: Buffer.from(JSON.stringify({ prompt: text, session_id: sessionId, actor_id: "default-user" }))
     });
 
+    const submittedAt = Date.now();                          // clock starts at submission to AgentCore
     const agentResponse = await agentClient.send(cmd);
 
     httpResponse.write(JSON.stringify({ type: "start" }) + "\n");
@@ -267,6 +271,10 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     };
 
     for await (const chunk of agentResponse.response) {
+      if (firstChunkMs === null) {                           // first chunk from AgentCore
+        firstChunkMs = Date.now() - submittedAt;
+        console.log("AGENTCORE_TTFC_MS", firstChunkMs);
+      }
       console.log("AGENTCORE_RESPONSE_CHUNK", chunk);
 
       buffer += decoder.decode(chunk, { stream: true });        // a chunk may split a line mid-way
@@ -281,9 +289,9 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     buffer += decoder.decode();
     if (buffer.trim()) processLine(buffer);
 
-    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, inputTokens, outputTokens }) + "\n");
+    httpResponse.write(JSON.stringify({ type: "done", escalation, endSession, inputTokens, outputTokens, firstChunkMs }) + "\n");
 
-    await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession, inputTokens, outputTokens });
+    await logMessage({ sessionId, messageId, question: text, answer: fullAnswer, escalation, endSession, inputTokens, outputTokens, firstChunkMs });
   } catch (e) {
     console.error("StreamLambda error:", e);
     httpResponse.write(JSON.stringify({ type: "error", message: e.message || "Something went wrong." }) + "\n");
