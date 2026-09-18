@@ -125,6 +125,12 @@
   .msg--user .bubble{background:var(--user-bubble);color:#fff;border-bottom-right-radius:4px;}
   .bubble strong{font-weight:700;}
   .bubble a{color:var(--brand-d);text-decoration:underline;word-break:break-word;}
+  .bubble .md-p{margin:0;} .bubble .md-p + .md-p{margin-top:8px;}
+  .bubble .md-h{font-weight:700;margin:2px 0;}
+  .bubble ul,.bubble ol{margin:6px 0 6px 20px;padding:0;}
+  .bubble li{margin:3px 0;}
+  .bubble code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:5px;font-size:12.5px;font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .msg--user .bubble code{background:rgba(255,255,255,.22);color:#fff;}
   .m-time{font-size:10.5px;color:var(--muted);margin:4px 2px 0;}
   .m-fb{font-size:11px;font-weight:700;margin-top:5px;}
   .m-fb--up{color:var(--ok);} .m-fb--down{color:var(--err);} .m-fb--none{color:var(--muted);}
@@ -216,7 +222,7 @@
     </section>
 
     <section class="panel full">
-      <div class="panel__h"><h3>Answer feedback log</h3><span class="hint">every 👍/👎 message · filterable</span></div>
+      <div class="panel__h"><h3>Answer feedback log</h3><span class="hint">every message · filter by rating</span></div>
       <div class="table-wrap">
         <table id="tblMessages">
           <thead>
@@ -227,12 +233,13 @@
               <th><input class="col-filter" id="fQuestion" placeholder="search question…"></th>
               <th><input class="col-filter" id="fMsgSession" placeholder="session…"></th>
               <th></th><th></th><th></th>
-              <th><select class="col-filter" id="fRating"><option value="">All</option><option value="up">👍 up</option><option value="down">👎 down</option></select></th>
+              <th><select class="col-filter" id="fRating"><option value="">All</option><option value="up">👍 up</option><option value="down">👎 down</option><option value="none">— no rating</option></select></th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
+      <div class="pager" id="msgPager"></div>
     </section>
 
     <p class="foot">
@@ -456,6 +463,7 @@ function renderCharts(D){
 /* ===== TABLES + column filters ===== */
 const ratingPill=(r)=> r==="up"?'<span class="pill pill--up">👍 up</span>':r==="down"?'<span class="pill pill--down">👎 down</span>':'<span class="pill pill--none">—</span>';
 const SESS_PAGE_SIZE=10; let sessPage=1;
+const MSG_PAGE_SIZE=10; let msgPage=1;
 function filteredSessions(){
   const q=(document.getElementById("fSession").value||"").toLowerCase();
   const csat=document.getElementById("fCsat").value, esc=document.getElementById("fEsc").value, ended=document.getElementById("fEnded").value;
@@ -503,31 +511,59 @@ function renderMessagesTable(){
   const q=(document.getElementById("fQuestion").value||"").toLowerCase();
   const sess=(document.getElementById("fMsgSession").value||"").toLowerCase();
   const rating=document.getElementById("fRating").value;
-  let rows=CURRENT.messages.filter(m=>m.feedbackRating);
-  rows=rows.filter(m=>{
-    if(rating&&m.feedbackRating!==rating) return false;
-    if(q&&!m.question.toLowerCase().includes(q)) return false;
-    if(sess&&!m.sessionId.toLowerCase().includes(sess)) return false;
+  const rows=CURRENT.messages.filter(m=>{
+    if(rating==="none"){ if(m.feedbackRating) return false; }
+    else if(rating){ if(m.feedbackRating!==rating) return false; }
+    if(q&&!(m.question||"").toLowerCase().includes(q)) return false;
+    if(sess&&!(m.sessionId||"").toLowerCase().includes(sess)) return false;
     return true;
   }).sort((a,b)=>a.ts<b.ts?1:-1);
+  const total=rows.length, pages=Math.max(1,Math.ceil(total/MSG_PAGE_SIZE));
+  if(msgPage>pages) msgPage=pages; if(msgPage<1) msgPage=1;
+  const page=rows.slice((msgPage-1)*MSG_PAGE_SIZE, msgPage*MSG_PAGE_SIZE);
   const body=document.querySelector("#tblMessages tbody");
-  if(!rows.length){body.innerHTML='<tr class="empty-row"><td colspan="6">No messages match these filters.</td></tr>';return;}
-  body.innerHTML=rows.slice(0,60).map(m=>`<tr class="clickable" data-session="${m.sessionId}">
-      <td class="q-cell">${escHtml(m.question)}</td><td>${m.sessionId}</td><td>${when(m.ts)}</td>
-      <td class="num">${fmtInt(m.inputTokens)}</td><td class="num">${fmtInt(m.outputTokens)}</td><td>${ratingPill(m.feedbackRating)}</td></tr>`).join("");
+  body.innerHTML = total ? page.map(m=>`<tr class="clickable" data-session="${m.sessionId}">
+      <td class="q-cell">${escHtml(m.question||"")}</td><td>${m.sessionId}</td><td>${when(m.ts)}</td>
+      <td class="num">${fmtInt(m.inputTokens)}</td><td class="num">${fmtInt(m.outputTokens)}</td><td>${ratingPill(m.feedbackRating)}</td></tr>`).join("")
+    : '<tr class="empty-row"><td colspan="6">No messages match these filters.</td></tr>';
+  const start=total?((msgPage-1)*MSG_PAGE_SIZE+1):0, end=Math.min(total,msgPage*MSG_PAGE_SIZE);
+  document.getElementById("msgPager").innerHTML=`
+    <span class="pager__info">Showing ${start}–${end} of ${fmtInt(total)}</span>
+    <div class="pager__ctrls">
+      <button class="pg-btn" data-mnav="prev" ${msgPage<=1?"disabled":""}>‹ Prev</button>
+      <span class="pager__page">Page ${msgPage} of ${pages}</span>
+      <button class="pg-btn" data-mnav="next" ${msgPage>=pages?"disabled":""}>Next ›</button>
+    </div>`;
 }
 
 /* ===== CONVERSATION MODAL (text + images like the chatbot) ===== */
 function escHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-function renderRich(text){
-  let s=escHtml(text);
-  s=s.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+function mdInline(s){
+  s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  s=s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>');
   s=s.replace(/((?:https?:\/\/|www\.)[^\s<]+)/g,(u)=>{
     let url=u, tail=""; const t=url.match(/[.,;:!?)\]}'"]+$/); if(t){tail=t[0];url=url.slice(0,-tail.length);}
     const href=/^www\./i.test(url)?"https://"+url:url;
     return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`+tail;
   });
-  return s.replace(/\n/g,"<br>");
+  return s;
+}
+function renderRich(text){
+  const lines=escHtml(text==null?"":String(text)).split(/\r?\n/);
+  let html="", list=null;
+  const closeList=()=>{ if(list){ html+="</"+list+">"; list=null; } };
+  for(const raw of lines){
+    const line=raw.trim();
+    if(!line){ closeList(); continue; }
+    let m;
+    if(m=line.match(/^#{1,6}\s+(.*)$/)){ closeList(); html+=`<div class="md-h">${mdInline(m[1])}</div>`; continue; }
+    if(m=line.match(/^[-*]\s+(.*)$/)){ if(list!=="ul"){ closeList(); html+="<ul>"; list="ul"; } html+=`<li>${mdInline(m[1])}</li>`; continue; }
+    if(m=line.match(/^\d+[.)]\s+(.*)$/)){ if(list!=="ol"){ closeList(); html+="<ol>"; list="ol"; } html+=`<li>${mdInline(m[1])}</li>`; continue; }
+    closeList(); html+=`<div class="md-p">${mdInline(line)}</div>`;
+  }
+  closeList();
+  return html;
 }
 const STEPPERS={}; let stepUid=0;
 function shotFig(im, step){
@@ -599,12 +635,17 @@ document.addEventListener("keydown",(e)=>{ if(e.key==="Escape"){closeModal();doc
 
 // a session filter change resets to page 1
 ["fSession","fFrom","fTo","fCsat","fEsc","fEnded"].forEach(id=>document.getElementById(id).addEventListener("input",()=>{sessPage=1;renderSessionsTable();}));
-["fQuestion","fMsgSession","fRating"].forEach(id=>document.getElementById(id).addEventListener("input",renderMessagesTable));
+["fQuestion","fMsgSession","fRating"].forEach(id=>document.getElementById(id).addEventListener("input",()=>{msgPage=1;renderMessagesTable();}));
 // pagination
 document.getElementById("sessPager").addEventListener("click",(e)=>{
   const b=e.target.closest("[data-nav]"); if(!b||b.disabled) return;
   sessPage+= b.dataset.nav==="next" ? 1 : -1;
   renderSessionsTable();
+});
+document.getElementById("msgPager").addEventListener("click",(e)=>{
+  const b=e.target.closest("[data-mnav]"); if(!b||b.disabled) return;
+  msgPage+= b.dataset.mnav==="next" ? 1 : -1;
+  renderMessagesTable();
 });
 
 /* ===== DRAW ===== */
@@ -612,7 +653,7 @@ function draw(){
   const days=Number(document.getElementById("range").value);
   CURRENT=sliceRange(days);
   const k=computeKpis(CURRENT);
-  sessPage=1; // reset pagination when the time range changes
+  sessPage=1; msgPage=1; // reset pagination when the time range changes
   renderCards(k); renderCharts(CURRENT); renderSessionsTable(); renderMessagesTable();
   const first=CURRENT.sessions.length?new Date([...CURRENT.sessions].sort((a,b)=>a.startedAt<b.startedAt?-1:1)[0].startedAt):null;
   document.getElementById("rangeNote").textContent=`${fmtInt(CURRENT.sessions.length)} sessions · ${fmtInt(CURRENT.messages.length)} messages`+(first?` · since ${first.toLocaleDateString()}`:"");

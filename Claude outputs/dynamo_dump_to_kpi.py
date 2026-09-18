@@ -25,6 +25,17 @@ import csv, json, argparse
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
 
+# Cell values that mean "no value" once a NULL / missing attribute is exported to CSV.
+_EMPTY = {"", "null", "none", "nan", "undefined"}
+
+
+def sval(v):
+    """A cleaned string, or None for empty / NULL-ish cells."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return None if s.lower() in _EMPTY else s
+
 
 def as_bool(v):
     if isinstance(v, bool):
@@ -33,10 +44,11 @@ def as_bool(v):
 
 
 def as_num(v):
-    if v is None or v == "":
+    s = sval(v)
+    if s is None:
         return None
     try:
-        f = float(v)
+        f = float(s)
         return int(f) if f.is_integer() else f
     except (TypeError, ValueError):
         return None
@@ -56,12 +68,13 @@ def iso_from_ms(ms):
 
 def parse_maybe_json(v):
     """`reasons` / suggestions `items` may export as JSON (plain or DynamoDB-typed)."""
-    if v is None or v == "":
+    s = sval(v)
+    if s is None:
         return None
     if isinstance(v, (list, dict)):
         return v
     try:
-        return json.loads(v)
+        return json.loads(s)
     except Exception:
         return None
 
@@ -84,7 +97,7 @@ def dynamo_unwrap(x):
 
 
 def item_type(row):
-    t = (row.get("type") or "").strip()
+    t = sval(row.get("type"))
     if t:
         return t
     pk, sk = (row.get("PK") or ""), (row.get("SK") or "")
@@ -96,7 +109,7 @@ def item_type(row):
 
 
 def sid_of(row):
-    return row.get("sessionId") or (row.get("PK") or "").replace("SESSION#", "")
+    return sval(row.get("sessionId")) or (row.get("PK") or "").replace("SESSION#", "") or None
 
 
 def main():
@@ -113,14 +126,15 @@ def main():
     with open(args.csv_path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             t = item_type(row)
-            if t == "SESSION_META":
-                metas[sid_of(row)] = row
-            elif t == "MESSAGE":
-                msgs_by_sid[sid_of(row)].append(row)
+            sid = sid_of(row)
+            if t == "SESSION_META" and sid:
+                metas[sid] = row
+            elif t == "MESSAGE" and sid:
+                msgs_by_sid[sid].append(row)
             elif t == "SUGGESTIONS":
                 raw = dynamo_unwrap(parse_maybe_json(row.get("items")) or [])
                 for s in (raw or []):
-                    if isinstance(s, dict) and s.get("question"):
+                    if isinstance(s, dict) and sval(s.get("question")):
                         suggestions.append({"question": str(s["question"]),
                                             "count": num0(s.get("count"))})
 
@@ -128,6 +142,7 @@ def main():
     for sid in (set(metas) | set(msgs_by_sid)):
         mrows = msgs_by_sid.get(sid, [])
         turn_ts, in_tot, out_tot, escalated = [], 0, 0, False
+        sid_messages = []
         for m in mrows:
             it, ot = num0(m.get("inputTokens")), num0(m.get("outputTokens"))
             in_tot += it; out_tot += ot
@@ -136,26 +151,27 @@ def main():
             ts = as_num(m.get("ts"))
             if ts is not None:
                 turn_ts.append(ts)
-            messages.append({
+            fb = sval(m.get("feedbackRating"))
+            sid_messages.append({
                 "sessionId": sid,
-                "messageId": m.get("messageId"),
-                "question": m.get("question"),
-                "answer": m.get("answer"),
+                "messageId": sval(m.get("messageId")),
+                "question": sval(m.get("question")),
+                "answer": sval(m.get("answer")),
                 "ts": ts,
                 "inputTokens": it, "outputTokens": ot,
-                "feedbackRating": (m.get("feedbackRating") or None),
+                "feedbackRating": fb if fb in ("up", "down") else None,
                 "images": None, "imageMode": None,
             })
 
         meta = metas.get(sid)
         if meta:
-            started = meta.get("startedAt") or (iso_from_ms(min(turn_ts)) if turn_ts else None)
-            ended   = meta.get("endedAt")   or (iso_from_ms(max(turn_ts)) if turn_ts else None)
+            started = sval(meta.get("startedAt")) or (iso_from_ms(min(turn_ts)) if turn_ts else None)
+            ended   = sval(meta.get("endedAt"))   or (iso_from_ms(max(turn_ts)) if turn_ts else None)
             dur     = as_num(meta.get("durationMs"))
             qcount  = as_num(meta.get("questionCount"))
             in_m    = as_num(meta.get("inputTokenTotal"))
             out_m   = as_num(meta.get("outputTokenTotal"))
-            rating  = meta.get("rating") or None
+            rating  = sval(meta.get("rating"))
             reasons = dynamo_unwrap(parse_maybe_json(meta.get("reasons")) or []) or []
         else:  # session with messages but no META (user never ended/rated it)
             started = iso_from_ms(min(turn_ts)) if turn_ts else None
@@ -172,6 +188,11 @@ def main():
         if out_m is None:
             out_m = out_tot
 
+        # a session needs a start time to sit on the time axis — drop it and its
+        # messages together so the tables/modal never reference an orphan session.
+        if not started:
+            continue
+
         sessions.append({
             "sessionId": sid,
             "startedAt": started, "endedAt": ended,
@@ -182,16 +203,14 @@ def main():
             "endedBy": "user" if escalated else "bot",   # heuristic: table doesn't store who ended
             "inputTokenTotal": in_m or 0,
             "outputTokenTotal": out_m or 0,
-            "_reasons": [r for r in reasons if r],
+            "_reasons": [str(r) for r in reasons if sval(r)],
         })
-
-    # a session needs a start time to sit on the time axis
-    sessions = [s for s in sessions if s["startedAt"]]
+        messages.extend(sid_messages)
 
     reason_counter = Counter()
     for s in sessions:
         for r in s.pop("_reasons", []):
-            reason_counter[str(r)] += 1
+            reason_counter[r] += 1
     reasons = [{"reason": r, "count": c} for r, c in reason_counter.most_common()]
 
     suggestions.sort(key=lambda s: s["count"], reverse=True)
